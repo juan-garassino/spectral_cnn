@@ -7,20 +7,34 @@ class UserWaveLinear(nn.Module):
     def __init__(self, in_dim, out_dim, num_waves=12):
         super().__init__()
         self.num_waves = num_waves
+        self.num_harmonics = 3  # cos(θ), cos(2θ), cos(4θ)
+        
         rank = 1
         self.u = nn.Parameter(torch.randn(num_waves, out_dim, rank) * 1.0)
         self.v = nn.Parameter(torch.randn(num_waves, in_dim, rank) * 1.0)
         init_freqs = torch.tensor([1.5**i for i in range(num_waves)]).float()
         self.freqs = nn.Parameter(init_freqs.view(num_waves, 1, 1))
-        self.amplitudes = nn.Parameter(torch.randn(num_waves) * 0.1) # Boosted
+        
+        # LEARNABLE Fourier coefficients for each wave
+        # Shape: [num_waves, num_harmonics]
+        # Initialize similar to [1.0, 0.5, 0.25] pattern
+        init_coeffs = torch.tensor([[1.0, 0.5, 0.25] for _ in range(num_waves)]).float()
+        self.fourier_coeffs = nn.Parameter(init_coeffs * (torch.randn(num_waves, self.num_harmonics) * 0.1 + 1.0))
+        
+        # Overall amplitude per wave
+        self.amplitudes = nn.Parameter(torch.randn(num_waves) * 0.1)
         self.bias = nn.Parameter(torch.zeros(out_dim))
 
     def forward(self, x):
         theta_base = torch.bmm(self.u, self.v.transpose(1, 2))
         theta = theta_base * self.freqs
         W = torch.zeros(self.u.shape[1], self.v.shape[1], device=x.device)
+        
         for i in range(self.num_waves):
-            wave = torch.cos(theta[i]) + 0.5 * torch.cos(2.0 * theta[i]) + 0.25 * torch.cos(4.0 * theta[i])
+            # Build wave from learnable Fourier components
+            wave = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
+                   self.fourier_coeffs[i, 1] * torch.cos(2.0 * theta[i]) + 
+                   self.fourier_coeffs[i, 2] * torch.cos(4.0 * theta[i]))
             W = W + self.amplitudes[i] * wave
         return x @ W.t() + self.bias
 
@@ -29,7 +43,9 @@ class UserWaveLinear(nn.Module):
             theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
             W = torch.zeros(self.u.shape[1], self.v.shape[1], device=self.u.device)
             for i in range(self.num_waves):
-                wave = torch.cos(theta[i]) + 0.5*torch.cos(2*theta[i]) + 0.25*torch.cos(4*theta[i])
+                wave = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
+                       self.fourier_coeffs[i, 1] * torch.cos(2.0 * theta[i]) + 
+                       self.fourier_coeffs[i, 2] * torch.cos(4.0 * theta[i]))
                 W = W + self.amplitudes[i] * wave
         return W
     
@@ -39,9 +55,30 @@ class UserWaveLinear(nn.Module):
             theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
             waves = []
             for i in range(self.num_waves):
-                wave = torch.cos(theta[i]) + 0.5*torch.cos(2*theta[i]) + 0.25*torch.cos(4*theta[i])
+                wave = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
+                       self.fourier_coeffs[i, 1] * torch.cos(2.0 * theta[i]) + 
+                       self.fourier_coeffs[i, 2] * torch.cos(4.0 * theta[i]))
                 waves.append(wave * self.amplitudes[i])
             return torch.stack(waves)
+    
+    def get_wave_components(self):
+        """Returns the individual Fourier components for each wave."""
+        with torch.no_grad():
+            theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
+            components = []
+            for i in range(self.num_waves):
+                # Each wave has 3 LEARNABLE Fourier components
+                comp1 = self.fourier_coeffs[i, 0] * torch.cos(theta[i]) * self.amplitudes[i]
+                comp2 = self.fourier_coeffs[i, 1] * torch.cos(2*theta[i]) * self.amplitudes[i]
+                comp3 = self.fourier_coeffs[i, 2] * torch.cos(4*theta[i]) * self.amplitudes[i]
+                components.append({
+                    'comp1': comp1, 
+                    'comp2': comp2, 
+                    'comp3': comp3, 
+                    'theta': theta[i],
+                    'coeffs': self.fourier_coeffs[i].clone()  # Show learned coefficients
+                })
+            return components
 
     def constrain(self): pass
 
@@ -134,14 +171,27 @@ class SirenLinear(nn.Module):
         self.L = 4
         input_dim = 2 + (2 * 2 * self.L)
         self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
+            nn.Linear(input_dim, hidden_dim), Sine(w0=30.0),
+            nn.Linear(hidden_dim, hidden_dim), Sine(w0=30.0),
             nn.Linear(hidden_dim, 1)
         )
+        
+        # SIREN Initialization
+        first = True
         for m in self.net.modules():
-            if isinstance(m, nn.Linear): nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear):
+                num_input = m.weight.size(-1)
+                if first:
+                    nn.init.uniform_(m.weight, -1 / num_input, 1 / num_input)
+                    first = False
+                else:
+                    nn.init.uniform_(m.weight, -np.sqrt(6 / num_input) / 30.0, np.sqrt(6 / num_input) / 30.0)
+                
         grid_y, grid_x = torch.meshgrid(torch.linspace(-1, 1, out_dim), torch.linspace(-1, 1, in_dim), indexing='ij')
         coords = torch.stack([grid_y, grid_x], dim=-1).reshape(-1, 2)
+        # Keep Fourier features as they help high frequency details even in SIRENs sometimes, 
+        # but pure SIREN usually takes raw coords. 
+        # Let's keep the embedding to minimize structural changes but use Sine activations.
         embeds = [coords]
         for i in range(self.L):
             freq = 2.0**i
@@ -161,13 +211,8 @@ class SirenLinear(nn.Module):
 class GatedWaveLinear(nn.Module):
     def __init__(self, in_dim, out_dim, num_waves=12):
         super().__init__()
-        # V14 BUDGET MATH:
-        # Target: ~9420 params per layer
-        # Signal: 10 Waves x (784+12+2) = 7980
-        # Gate: Rank 2 x (784+12) = 1592
-        # Total: 9572. (Matches Standard's 9420 + overhead).
-
         self.signal_waves = 10
+        self.num_harmonics = 3
         rank = 1
 
         # Signal Init
@@ -176,15 +221,16 @@ class GatedWaveLinear(nn.Module):
         init_freqs = torch.tensor([1.5**i for i in range(self.signal_waves)]).float()
         self.freqs = nn.Parameter(init_freqs.view(self.signal_waves, 1, 1))
 
-        # BOOSTED INIT: 0.1 allows signal to flow through the gate immediately
+        # LEARNABLE Fourier coefficients
+        init_coeffs = torch.tensor([[1.0, 0.5, 0.25] for _ in range(self.signal_waves)]).float()
+        self.fourier_coeffs = nn.Parameter(init_coeffs * (torch.randn(self.signal_waves, self.num_harmonics) * 0.1 + 1.0))
+        
         self.amplitudes = nn.Parameter(torch.randn(self.signal_waves) * 0.1)
 
         # Gate Init (Rank 2)
         self.gate_rank = 2
         self.u_gate = nn.Parameter(torch.randn(out_dim, self.gate_rank) * 0.1)
         self.v_gate = nn.Parameter(torch.randn(in_dim, self.gate_rank) * 0.1)
-
-        # Bias +2.0 keeps gate open at start
         self.gate_bias = nn.Parameter(torch.ones(1) * 2.0)
 
         self.bias = nn.Parameter(torch.zeros(out_dim))
@@ -193,11 +239,12 @@ class GatedWaveLinear(nn.Module):
         theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
         signal = torch.zeros(self.u.shape[1], self.v.shape[1], device=x.device)
         for i in range(self.signal_waves):
-            w = torch.cos(theta[i]) + 0.5*torch.cos(2*theta[i]) + 0.25*torch.cos(4*theta[i])
+            w = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
+                self.fourier_coeffs[i, 1] * torch.cos(2*theta[i]) + 
+                self.fourier_coeffs[i, 2] * torch.cos(4*theta[i]))
             signal = signal + self.amplitudes[i] * w
 
         gate = torch.sigmoid((self.u_gate @ self.v_gate.t()) + self.gate_bias)
-
         W = signal * gate
         return x @ W.t() + self.bias
 
@@ -206,7 +253,9 @@ class GatedWaveLinear(nn.Module):
             theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
             signal = torch.zeros(self.u.shape[1], self.v.shape[1], device=self.u.device)
             for i in range(self.signal_waves):
-                w = torch.cos(theta[i]) + 0.5*torch.cos(2*theta[i]) + 0.25*torch.cos(4*theta[i])
+                w = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
+                    self.fourier_coeffs[i, 1] * torch.cos(2*theta[i]) + 
+                    self.fourier_coeffs[i, 2] * torch.cos(4*theta[i]))
                 signal = signal + self.amplitudes[i] * w
             gate = torch.sigmoid((self.u_gate @ self.v_gate.t()) + self.gate_bias)
             W = signal * gate
@@ -217,8 +266,29 @@ class GatedWaveLinear(nn.Module):
             theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
             waves = []
             for i in range(self.signal_waves):
-                w = torch.cos(theta[i]) + 0.5*torch.cos(2*theta[i]) + 0.25*torch.cos(4*theta[i])
+                w = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
+                    self.fourier_coeffs[i, 1] * torch.cos(2*theta[i]) + 
+                    self.fourier_coeffs[i, 2] * torch.cos(4*theta[i]))
                 waves.append(w * self.amplitudes[i])
             return torch.stack(waves)
+    
+    def get_wave_components(self):
+        """Returns the individual Fourier components for each wave."""
+        with torch.no_grad():
+            theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
+            components = []
+            for i in range(self.signal_waves):
+                comp1 = self.fourier_coeffs[i, 0] * torch.cos(theta[i]) * self.amplitudes[i]
+                comp2 = self.fourier_coeffs[i, 1] * torch.cos(2*theta[i]) * self.amplitudes[i]
+                comp3 = self.fourier_coeffs[i, 2] * torch.cos(4*theta[i]) * self.amplitudes[i]
+                components.append({
+                    'comp1': comp1, 
+                    'comp2': comp2, 
+                    'comp3': comp3, 
+                    'theta': theta[i],
+                    'coeffs': self.fourier_coeffs[i].clone()
+                })
+            return components
 
     def constrain(self): pass
+

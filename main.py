@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from datetime import datetime
 from src.training.trainer import train_fit
-from src.visualization.plotter import plot_results, plot_layer_waves
+from src.visualization.plotter import plot_results, plot_layer_waves, plot_wave_decomposition
 
 # Configuration
 NUM_EPOCHS = 3
@@ -12,7 +12,7 @@ MODES = ["Standard", "UserWave", "Poly", "Wavelet", "Factor", "Siren", "GatedWav
 
 def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_dir = f"./WeightParam_Benchmark_{timestamp}/"
+    base_dir = f"./results/WeightParam_Benchmark_{timestamp}/"
     os.makedirs(base_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,11 +24,11 @@ def main():
     for m in MODES:
         results[m] = train_fit(m, NUM_WAVES, NUM_EPOCHS, device)
 
-    print("\n" + "="*125)
+    print("\n" + "="*155)
     print(f"FINAL LEADERBOARD ({NUM_EPOCHS} Epochs) - V14 RESULTS")
-    print("="*125)
-    print(f"| {'Model':<15} | {'Params':<10} | {'Comp Ratio':<10} | {'Train %':<8} | {'Test %':<8} | {'Gen Gap':<8} | {'Eff. Score':<10} |")
-    print("-" * 125)
+    print("="*155)
+    print(f"| {'Model':<15} | {'Params':<10} | {'Comp Ratio':<10} | {'Train %':<8} | {'Test %':<8} | {'Gen Gap':<8} | {'Time (s)':<10} | {'Inf (s/sec)':<12} | {'Eff. Score':<10} |")
+    print("-" * 155)
 
     baseline_params = results["Standard"]["params"]
     for m in MODES:
@@ -36,8 +36,8 @@ def main():
         comp_ratio = baseline_params / r['params'] if r['params'] > 0 else 0
         gen_gap = r['train_acc'] - r['test_acc']
         eff_score = (r['test_acc'] / np.log10(r['params'])) if r['params'] > 0 else 0
-        print(f"| {m:<15} | {r['params']:<10,} | {comp_ratio:<9.1f}x | {r['train_acc']:<8.2f} | {r['test_acc']:<8.2f} | {gen_gap:<8.2f} | {eff_score:<10.2f} |")
-    print("-" * 125)
+        print(f"| {m:<15} | {r['params']:<10,} | {comp_ratio:<9.1f}x | {r['train_acc']:<8.2f} | {r['test_acc']:<8.2f} | {gen_gap:<8.2f} | {r['total_time']:<10.2f} | {r['inference_speed']:<12.0f} | {eff_score:<10.2f} |")
+    print("-" * 155)
 
     # Visualization
     plot_results(results, MODES, base_dir, NUM_EPOCHS)
@@ -46,6 +46,14 @@ def main():
     print("\n[Generating Wave Plots...]")
     for m in MODES:
         plot_layer_waves(results[m]['model'], m, base_dir)
+    
+    # Fourier Decomposition (for wave-based models)
+    print("\n[Generating Fourier Decomposition Plots...]")
+    for m in ["UserWave", "GatedWave"]:
+        if m in results:
+            # Show decomposition for first 3 waves
+            for wave_idx in range(min(3, NUM_WAVES)):
+                plot_wave_decomposition(results[m]['model'], m, base_dir, wave_idx=wave_idx)
 
     print(f"All results and plots saved to {base_dir}")
 

@@ -19,7 +19,7 @@ def get_optimizer(model, mode):
     for name, p in model.named_parameters():
         if 'bias' in name: bias.append(p)
         elif any(k in name for k in ['u', 'v', 'U', 'V', 'net']): phase.append(p)
-        elif any(k in name for k in ['amp', 'coeff']): amp.append(p)
+        elif any(k in name for k in ['amp', 'coeff', 'fourier_coeffs']): amp.append(p)  # Fourier coefficients get amp LR
         else: phase.append(p)
     return torch.optim.Adam([{'params':phase,'lr':LR_PHASE},{'params':amp,'lr':LR_AMP},{'params':bias,'lr':LR_BIAS}])
 
@@ -74,11 +74,24 @@ def train_fit(mode_name, num_waves, num_epochs, device):
         if epoch % 5 == 0 or epoch == num_epochs-1:
             print(f"Ep {epoch+1:3d} | Train: {train_acc:.2f}% | Test: {acc:.2f}%")
 
+    total_time = time.time() - start
+    
+    # Inference Speed Test
+    model.eval()
+    start_infer = time.time()
+    with torch.no_grad():
+        for x, y in test_loader:
+            _ = model(x.to(device))
+    infer_time = time.time() - start_infer
+    samples_per_sec = len(test_loader.dataset) / infer_time
+
     calc_model = model.module if isinstance(model, nn.DataParallel) else model
     return {
         'test_acc': acc,
         'train_acc': train_acc,
         'params': sum(p.numel() for p in calc_model.parameters() if p.requires_grad),
         'model': calc_model,
-        'history': history
+        'history': history,
+        'total_time': total_time,
+        'inference_speed': samples_per_sec
     }
