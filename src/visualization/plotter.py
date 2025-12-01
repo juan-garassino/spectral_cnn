@@ -78,7 +78,8 @@ def plot_layer_waves(model, mode_name, base_dir):
         
         # Row 1: 2D Heatmap of the wave
         plt.subplot(3, waves_to_plot, i+1)
-        plt.imshow(wave_2d, cmap='coolwarm', vmin=-wave_2d.max(), vmax=wave_2d.max())
+        vmax = max(np.abs(wave_2d).max(), 1e-8)  # Prevent zero range
+        plt.imshow(wave_2d, cmap='coolwarm', vmin=-vmax, vmax=vmax)
         plt.title(f"Wave {i}\n(2D)", fontsize=9)
         plt.axis('off')
         
@@ -88,7 +89,8 @@ def plot_layer_waves(model, mode_name, base_dir):
         plt.plot(mid_row, linewidth=1.5)
         plt.title(f"1D Slice", fontsize=9)
         plt.grid(True, alpha=0.3)
-        plt.ylim(-np.abs(waves[:waves_to_plot, 0, :]).max(), np.abs(waves[:waves_to_plot, 0, :]).max())
+        max_amp = max(np.abs(waves[:waves_to_plot, 0, :]).max(), 1e-8)  # Prevent zero range
+        plt.ylim(-max_amp, max_amp)
         
     # Row 3: Superposition (how waves combine)
     plt.subplot(3, 1, 3)
@@ -128,72 +130,66 @@ def plot_wave_decomposition(model, mode_name, base_dir, wave_idx=0):
         wave_idx = 0
     
     comp_data = components[wave_idx]
-    comp1 = comp_data['comp1'].detach().cpu().numpy()
-    comp2 = comp_data['comp2'].detach().cpu().numpy()
-    comp3 = comp_data['comp3'].detach().cpu().numpy()
     learned_coeffs = comp_data['coeffs'].cpu().numpy()  # Get learned coefficients
+    harmonic_freqs = comp_data['harmonic_freqs'].cpu().numpy()  # Get frequency multipliers
+    num_harmonics = len(learned_coeffs)
     
-    # Get the neuron 0 slice
+    # Get first component to determine shape
+    comp1 = comp_data['comp1'].detach().cpu().numpy()
     side = int(np.sqrt(comp1.shape[1]))
     
-    fig = plt.figure(figsize=(15, 10))
+    # Determine grid layout based on number of harmonics
+    ncols = min(num_harmonics, 4)  # Max 4 columns
+    nrows_per_section = int(np.ceil(num_harmonics / ncols))
     
-    # Row 1: Individual Fourier Components (1D)
-    for idx, (comp, base_label, color) in enumerate([(comp1, 'cos(θ)', 'blue'), 
-                                                   (comp2, '0.5·cos(2θ)', 'green'),
-                                                   (comp3, '0.25·cos(4θ)', 'red')]):
-        plt.subplot(4, 3, idx+1)
+    fig = plt.figure(figsize=(ncols * 3.5, 10))
+    
+    # Row 1: Individual Fourier Components (1D) - show up to 8
+    colors = ['blue', 'green', 'red', 'purple', 'orange', 'brown', 'pink', 'gray']
+    for h in range(min(num_harmonics, 8)):
+        comp = comp_data[f'comp{h+1}'].detach().cpu().numpy()
         comp_2d = comp[0, :].reshape(side, side)
         mid_row = comp_2d[side//2, :]
-        # Show learned coefficient
-        label = f"{learned_coeffs[idx]:.3f}·cos({[1,2,4][idx]}θ)"
-        plt.plot(mid_row, color=color, linewidth=2, label=label)
-        plt.title(f"Fourier Component: {label}", fontweight='bold', fontsize=10)
+        
+        plt.subplot(3, min(num_harmonics, 8), h+1)
+        label = f"{learned_coeffs[h]:.3f}·cos({int(harmonic_freqs[h])}θ)"
+        plt.plot(mid_row, color=colors[h % len(colors)], linewidth=2, label=label)
+        plt.title(f"Component: {label}", fontweight='bold', fontsize=9)
         plt.grid(True, alpha=0.3)
-        plt.ylabel("Amplitude")
-        plt.legend()
+        plt.ylabel("Amplitude", fontsize=8)
+        plt.legend(fontsize=7)
     
-    # Row 2: Individual Fourier Components (2D Heatmaps)
-    for idx, (comp, label) in enumerate([(comp1, f'{learned_coeffs[0]:.3f}·cos(θ)'), 
-                                          (comp2, f'{learned_coeffs[1]:.3f}·cos(2θ)'),
-                                          (comp3, f'{learned_coeffs[2]:.3f}·cos(4θ)')]):
-        plt.subplot(4, 3, idx+4)
-        comp_2d = comp[0, :].reshape(side, side)
-        plt.imshow(comp_2d, cmap='coolwarm', vmin=-np.abs(comp_2d).max(), vmax=np.abs(comp_2d).max())
-        plt.title(f"{label} (2D)", fontsize=10)
-        plt.axis('off')
-        plt.colorbar(fraction=0.046, pad=0.04)
-    
-    # Row 3: Combined Wave
-    combined_wave = comp1 + comp2 + comp3
+    # Row 2: Combined Wave
+    plt.subplot(3, 2, (min(num_harmonics, 8) + 1) // min(num_harmonics, 8) * 2 - 1)
+    combined_wave = sum(comp_data[f'comp{h+1}'].detach().cpu().numpy() for h in range(num_harmonics))
     combined_2d = combined_wave[0, :].reshape(side, side)
     mid_row_combined = combined_2d[side//2, :]
     
-    plt.subplot(4, 3, 7)
-    comp1_mid = comp1[0, :].reshape(side, side)[side//2, :]
-    comp2_mid = comp2[0, :].reshape(side, side)[side//2, :]
-    comp3_mid = comp3[0, :].reshape(side, side)[side//2, :]
+    # Plot individual components faintly
+    for h in range(min(num_harmonics, 8)):
+        comp = comp_data[f'comp{h+1}'].detach().cpu().numpy()
+        comp_mid = comp[0, :].reshape(side, side)[side//2, :]
+        plt.plot(comp_mid, alpha=0.3, linewidth=1, 
+                label=f'{learned_coeffs[h]:.3f}·cos({int(harmonic_freqs[h])}θ)', 
+                color=colors[h % len(colors)])
     
-    plt.plot(comp1_mid, 'b-', alpha=0.3, linewidth=1, label=f'{learned_coeffs[0]:.3f}·cos(θ)')
-    plt.plot(comp2_mid, 'g-', alpha=0.3, linewidth=1, label=f'{learned_coeffs[1]:.3f}·cos(2θ)')
-    plt.plot(comp3_mid, 'r-', alpha=0.3, linewidth=1, label=f'{learned_coeffs[2]:.3f}·cos(4θ)')
     plt.plot(mid_row_combined, 'k-', linewidth=2.5, label='Combined Wave')
     plt.title("Wave Superposition (1D)", fontweight='bold', fontsize=12)
     plt.xlabel("Position")
     plt.ylabel("Amplitude")
     plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=9)
+    plt.legend(fontsize=7, ncol=2)
     
-    plt.subplot(4, 3, 8)
+    # 2D Heatmap of combined wave
+    plt.subplot(3, 2, (min(num_harmonics, 8) + 1) // min(num_harmonics, 8) * 2)
     plt.imshow(combined_2d, cmap='viridis')
     plt.title("Combined Wave (2D Heatmap)", fontweight='bold', fontsize=12)
     plt.axis('off')
     plt.colorbar(fraction=0.046, pad=0.04)
     
-    # Row 4: Frequency spectrum with LEARNED amplitudes
-    plt.subplot(4, 3, 10)
-    freqs = [1, 2, 4]
-    plt.stem(freqs, learned_coeffs, basefmt=" ")
+    # Row 3: Frequency spectrum with LEARNED amplitudes  
+    plt.subplot(3, 2, 5)
+    plt.stem(harmonic_freqs, learned_coeffs, basefmt=" ")
     plt.title("Learned Frequency Spectrum", fontweight='bold')
     plt.xlabel("Frequency (×ω)")
     plt.ylabel("Learned Amplitude")
@@ -201,18 +197,19 @@ def plot_wave_decomposition(model, mode_name, base_dir, wave_idx=0):
     plt.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
     
     # Add text showing coefficients
-    plt.subplot(4, 3, 11)
+    plt.subplot(3, 2, 6)
     plt.axis('off')
-    plt.text(0.5, 0.5, f"Learned Coefficients (Wave {wave_idx}):\n\n" + 
-             f"c₁ = {learned_coeffs[0]:.4f}\n" +
-             f"c₂ = {learned_coeffs[1]:.4f}\n" +
-             f"c₃ = {learned_coeffs[2]:.4f}\n\n" +
-             f"Formula:\nwave = c₁·cos(θ) + c₂·cos(2θ) + c₃·cos(4θ)",
-             ha='center', va='center', fontsize=11, family='monospace',
+    coeff_text = f"Learned Coefficients (Wave {wave_idx}):\n\n"
+    for h in range(num_harmonics):
+        coeff_text += f"c_{h+1} = {learned_coeffs[h]:.4f} (×{int(harmonic_freqs[h])}ω)\n"
+    coeff_text += f"\nFormula:\nwave = " + " + ".join([f"c_{h+1}·cos({int(harmonic_freqs[h])}θ)" for h in range(num_harmonics)])
+    
+    plt.text(0.5, 0.5, coeff_text,
+             ha='center', va='center', fontsize=9, family='monospace',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
-    plt.suptitle(f"Fourier Decomposition: {mode_name} - Wave {wave_idx}\n(Optimized Coefficients)", 
-                 fontsize=16, fontweight='bold', y=0.995)
+    plt.suptitle(f"Fourier Decomposition: {mode_name} - Wave {wave_idx}\n({num_harmonics} Harmonics, Optimized Coefficients)", 
+                 fontsize=14, fontweight='bold', y=0.995)
     plt.tight_layout()
     plt.savefig(f"{base_dir}/{mode_name}_fourier_decomposition_wave{wave_idx}.png", dpi=150)
     plt.close()

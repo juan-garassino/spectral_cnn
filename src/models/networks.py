@@ -5,7 +5,7 @@ from .layers import UserWaveLinear, PolyLinear, WaveletLinear, FactorLinear, Sir
 
 class UniversalMLP(nn.Module):
     def __init__(self, layer_type, num_waves=12, num_harmonics=3, 
-                 adaptive_freqs=False, per_neuron_coeffs=False):
+                 adaptive_freqs=False, per_neuron_coeffs=False, wave_mode="outer_product"):
         super().__init__()
         if layer_type == "UserWave": Layer = UserWaveLinear
         elif layer_type == "Poly":   Layer = PolyLinear
@@ -23,11 +23,14 @@ class UniversalMLP(nn.Module):
         elif layer_type in ["UserWave", "GatedWave"]:
             # Spectral layers with Fourier configuration
             self.fc1 = Layer(28*28, HIDDEN, num_waves=num_waves, num_harmonics=num_harmonics,
-                           adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs)
+                           adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                           wave_mode=wave_mode)
             self.fc2 = Layer(HIDDEN, HIDDEN, num_waves=num_waves, num_harmonics=num_harmonics,
-                           adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs)
+                           adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                           wave_mode=wave_mode)
             self.fc3 = Layer(HIDDEN, 10, num_waves=num_waves, num_harmonics=num_harmonics,
-                           adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs)
+                           adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                           wave_mode=wave_mode)
         else:
             self.fc1 = Layer(28*28, HIDDEN, num_waves=num_waves)
             self.fc2 = Layer(HIDDEN, HIDDEN, num_waves=num_waves)

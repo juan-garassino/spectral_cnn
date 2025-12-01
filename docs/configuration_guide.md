@@ -9,6 +9,21 @@ NUM_EPOCHS = 3          # Training epochs
 NUM_WAVES = 12          # Number of waves per layer
 ```
 
+## Understanding the Parameters: An Analogy
+
+Think of the spectral layer as a **musical chord**:
+
+*   **`NUM_WAVES` (e.g., 12)**: The number of **"chords"** playing at once to create the full song (the weight matrix). It controls the **capacity** of the layer. More waves = more independent patterns can be represented.
+*   **`NUM_HARMONICS` (e.g., 3)**: The number of **"notes"** in each chord. It controls the **richness** or complexity of each individual wave.
+    *   **1 Harmonic**: Pure sine wave (simple tone).
+    *   **3 Harmonics**: Mix of Base + 2x + 4x frequencies (complex tone, like a sawtooth).
+    *   **5+ Harmonics**: Very rich texture with sharp edges.
+
+**Summary:**
+*   **`NUM_WAVES`**: Adds more *independent patterns*.
+*   **`NUM_HARMONICS`**: Makes each pattern *more complex*.
+
+
 ## Fourier Configuration
 
 ### `NUM_HARMONICS` (default: 3)
