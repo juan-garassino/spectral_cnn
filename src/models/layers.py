@@ -4,22 +4,54 @@ import numpy as np
 
 # 1. USER WAVE
 class UserWaveLinear(nn.Module):
-    def __init__(self, in_dim, out_dim, num_waves=12):
+    def __init__(self, in_dim, out_dim, num_waves=12, num_harmonics=3, 
+                 adaptive_freqs=False, per_neuron_coeffs=False):
+        """
+        Args:
+            in_dim: Input dimension
+            out_dim: Output dimension
+            num_waves: Number of waves to superpose
+            num_harmonics: Number of Fourier components per wave (default: 3)
+            adaptive_freqs: If True, harmonic frequencies are learnable (default: False, uses [1, 2, 4, 8, ...])
+            per_neuron_coeffs: If True, each output neuron has its own coefficients (default: False, shared)
+        """
         super().__init__()
         self.num_waves = num_waves
-        self.num_harmonics = 3  # cos(θ), cos(2θ), cos(4θ)
+        self.num_harmonics = num_harmonics
+        self.adaptive_freqs = adaptive_freqs
+        self.per_neuron_coeffs = per_neuron_coeffs
         
         rank = 1
         self.u = nn.Parameter(torch.randn(num_waves, out_dim, rank) * 1.0)
         self.v = nn.Parameter(torch.randn(num_waves, in_dim, rank) * 1.0)
+        
+        # Base frequency per wave
         init_freqs = torch.tensor([1.5**i for i in range(num_waves)]).float()
         self.freqs = nn.Parameter(init_freqs.view(num_waves, 1, 1))
         
-        # LEARNABLE Fourier coefficients for each wave
-        # Shape: [num_waves, num_harmonics]
-        # Initialize similar to [1.0, 0.5, 0.25] pattern
-        init_coeffs = torch.tensor([[1.0, 0.5, 0.25] for _ in range(num_waves)]).float()
-        self.fourier_coeffs = nn.Parameter(init_coeffs * (torch.randn(num_waves, self.num_harmonics) * 0.1 + 1.0))
+        # Harmonic multipliers (1×, 2×, 4×, 8×, ...)
+        if adaptive_freqs:
+            # Learnable harmonic frequencies
+            init_harm_freqs = torch.tensor([2.0**i for i in range(num_harmonics)]).float()
+            self.harmonic_freqs = nn.Parameter(init_harm_freqs)
+        else:
+            # Fixed harmonic frequencies [1, 2, 4, 8, ...]
+            self.register_buffer('harmonic_freqs', torch.tensor([2.0**i for i in range(num_harmonics)]).float())
+        
+        # Fourier coefficients
+        if per_neuron_coeffs:
+            # Each output neuron has its own coefficients [num_waves, out_dim, num_harmonics]
+            init_coeffs = torch.randn(num_waves, out_dim, num_harmonics) * 0.1
+            # Bias towards decreasing amplitude with frequency
+            for h in range(num_harmonics):
+                init_coeffs[:, :, h] += (0.5 ** h)
+            self.fourier_coeffs = nn.Parameter(init_coeffs)
+        else:
+            # Shared coefficients across neurons [num_waves, num_harmonics]
+            init_coeffs = torch.randn(num_waves, num_harmonics) * 0.1
+            for h in range(num_harmonics):
+                init_coeffs[:, h] += (0.5 ** h)
+            self.fourier_coeffs = nn.Parameter(init_coeffs)
         
         # Overall amplitude per wave
         self.amplitudes = nn.Parameter(torch.randn(num_waves) * 0.1)
@@ -31,10 +63,15 @@ class UserWaveLinear(nn.Module):
         W = torch.zeros(self.u.shape[1], self.v.shape[1], device=x.device)
         
         for i in range(self.num_waves):
-            # Build wave from learnable Fourier components
-            wave = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
-                   self.fourier_coeffs[i, 1] * torch.cos(2.0 * theta[i]) + 
-                   self.fourier_coeffs[i, 2] * torch.cos(4.0 * theta[i]))
+            wave = torch.zeros_like(theta[i])
+            for h in range(self.num_harmonics):
+                harmonic = torch.cos(self.harmonic_freqs[h] * theta[i])
+                if self.per_neuron_coeffs:
+                    # Different coefficients per output neuron
+                    wave = wave + self.fourier_coeffs[i, :, h].unsqueeze(1) * harmonic
+                else:
+                    # Shared coefficients
+                    wave = wave + self.fourier_coeffs[i, h] * harmonic
             W = W + self.amplitudes[i] * wave
         return x @ W.t() + self.bias
 
@@ -43,9 +80,13 @@ class UserWaveLinear(nn.Module):
             theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
             W = torch.zeros(self.u.shape[1], self.v.shape[1], device=self.u.device)
             for i in range(self.num_waves):
-                wave = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
-                       self.fourier_coeffs[i, 1] * torch.cos(2.0 * theta[i]) + 
-                       self.fourier_coeffs[i, 2] * torch.cos(4.0 * theta[i]))
+                wave = torch.zeros_like(theta[i])
+                for h in range(self.num_harmonics):
+                    harmonic = torch.cos(self.harmonic_freqs[h] * theta[i])
+                    if self.per_neuron_coeffs:
+                        wave = wave + self.fourier_coeffs[i, :, h].unsqueeze(1) * harmonic
+                    else:
+                        wave = wave + self.fourier_coeffs[i, h] * harmonic
                 W = W + self.amplitudes[i] * wave
         return W
     
@@ -55,9 +96,13 @@ class UserWaveLinear(nn.Module):
             theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
             waves = []
             for i in range(self.num_waves):
-                wave = (self.fourier_coeffs[i, 0] * torch.cos(theta[i]) + 
-                       self.fourier_coeffs[i, 1] * torch.cos(2.0 * theta[i]) + 
-                       self.fourier_coeffs[i, 2] * torch.cos(4.0 * theta[i]))
+                wave = torch.zeros_like(theta[i])
+                for h in range(self.num_harmonics):
+                    harmonic = torch.cos(self.harmonic_freqs[h] * theta[i])
+                    if self.per_neuron_coeffs:
+                        wave = wave + self.fourier_coeffs[i, :, h].unsqueeze(1) * harmonic
+                    else:
+                        wave = wave + self.fourier_coeffs[i, h] * harmonic
                 waves.append(wave * self.amplitudes[i])
             return torch.stack(waves)
     
@@ -67,18 +112,27 @@ class UserWaveLinear(nn.Module):
             theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
             components = []
             for i in range(self.num_waves):
-                # Each wave has 3 LEARNABLE Fourier components
-                comp1 = self.fourier_coeffs[i, 0] * torch.cos(theta[i]) * self.amplitudes[i]
-                comp2 = self.fourier_coeffs[i, 1] * torch.cos(2*theta[i]) * self.amplitudes[i]
-                comp3 = self.fourier_coeffs[i, 2] * torch.cos(4*theta[i]) * self.amplitudes[i]
-                components.append({
-                    'comp1': comp1, 
-                    'comp2': comp2, 
-                    'comp3': comp3, 
-                    'theta': theta[i],
-                    'coeffs': self.fourier_coeffs[i].clone()  # Show learned coefficients
-                })
+                comp_dict = {}
+                for h in range(self.num_harmonics):
+                    harmonic = torch.cos(self.harmonic_freqs[h] * theta[i])
+                    if self.per_neuron_coeffs:
+                        comp = self.fourier_coeffs[i, :, h].unsqueeze(1) * harmonic * self.amplitudes[i]
+                    else:
+                        comp = self.fourier_coeffs[i, h] * harmonic * self.amplitudes[i]
+                    comp_dict[f'comp{h+1}'] = comp
+                
+                comp_dict['theta'] = theta[i]
+                comp_dict['harmonic_freqs'] = self.harmonic_freqs.clone()
+                if self.per_neuron_coeffs:
+                    comp_dict['coeffs'] = self.fourier_coeffs[i, 0, :].clone()  # Show neuron 0's coeffs
+                else:
+                    comp_dict['coeffs'] = self.fourier_coeffs[i, :].clone()
+                components.append(comp_dict)
             return components
+    
+    def get_l1_loss(self):
+        """Returns L1 penalty on Fourier coefficients for sparsity."""
+        return torch.abs(self.fourier_coeffs).sum()
 
     def constrain(self): pass
 

@@ -23,7 +23,8 @@ def get_optimizer(model, mode):
         else: phase.append(p)
     return torch.optim.Adam([{'params':phase,'lr':LR_PHASE},{'params':amp,'lr':LR_AMP},{'params':bias,'lr':LR_BIAS}])
 
-def train_fit(mode_name, num_waves, num_epochs, device):
+def train_fit(mode_name, num_waves, num_epochs, device, num_harmonics=3, 
+             adaptive_freqs=False, per_neuron_coeffs=False, l1_penalty=0.0):
     print(f"\n--- Fitting: {mode_name} ---")
     
     # Data Loading (Ideally this should be passed in or cached, but keeping it simple for now)
@@ -31,7 +32,8 @@ def train_fit(mode_name, num_waves, num_epochs, device):
     train_loader = DataLoader(datasets.MNIST("./data", train=True, download=True, transform=transform), batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(datasets.MNIST("./data", train=False, download=True, transform=transform), batch_size=256, shuffle=False)
 
-    model = UniversalMLP(mode_name, num_waves).to(device)
+    model = UniversalMLP(mode_name, num_waves, num_harmonics=num_harmonics,
+                        adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs).to(device)
     if torch.cuda.device_count() > 1: model = nn.DataParallel(model)
     opt = get_optimizer(model, mode_name)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=5)
@@ -49,6 +51,12 @@ def train_fit(mode_name, num_waves, num_epochs, device):
             opt.zero_grad()
             out = model(x)
             loss = F.cross_entropy(out, y)
+            
+            # Add L1 penalty on Fourier coefficients if enabled
+            if l1_penalty > 0.0:
+                calc_model = model.module if isinstance(model, nn.DataParallel) else model
+                loss = loss + l1_penalty * calc_model.get_l1_loss()
+            
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
