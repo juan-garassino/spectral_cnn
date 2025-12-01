@@ -45,7 +45,7 @@ The script generates the following plots:
 
 1.  **Clone the repository:**
     ```bash
-    !git clone https://github.com/YOUR_USERNAME/spectral_cnn.git
+    !git clone https://github.com/juan-garassino/spectral_cnn.git
     %cd spectral_cnn
     ```
 
