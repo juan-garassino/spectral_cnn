@@ -11,7 +11,7 @@ from rich.table import Table
 console = Console()
 
 # Configuration
-NUM_EPOCHS = 1 # 3
+NUM_EPOCHS = 10 # 3
 NUM_WAVES = 12
 MODES = ["Standard", "UserWave", "Poly", "Wavelet", "Factor", "Siren", "GatedWave"]
 
@@ -20,7 +20,7 @@ NUM_HARMONICS = 3          # Number of Fourier components per wave (3 = cos(θ),
 ADAPTIVE_FREQS = False     # If True, harmonic frequencies [1, 2, 4, ...] become learnable
 PER_NEURON_COEFFS = False  # If True, each output neuron has its own Fourier coefficients
 L1_PENALTY = 0.0           # L1 regularization strength on Fourier coefficients (0.0 = disabled)
-WAVE_MODE = "fourier_series"  # "outer_product" (2D patterns) or "fourier_series" (1D smooth sinusoids)
+WAVE_MODE = "outer_product"  # "outer_product" (2D patterns) or "fourier_series" (1D smooth sinusoids)
 
 # Experiment Configurations
 EXPERIMENTS = {
@@ -58,25 +58,43 @@ EXPERIMENTS = {
         "per_neuron_coeffs": True,
         "l1_penalty": 0.005,
         "description": "Per-neuron coefficients (max flexibility)"
+    },
+    "1d_high_capacity": {
+        "description": "1D Mode with 64 waves (High Capacity)",
+        "num_harmonics": 7,
+        "adaptive_freqs": True,
+        "per_neuron_coeffs": False,
+        "l1_penalty": 0.0,
+        "num_waves": 64,
+        "wave_mode": "fourier_series"
+    },
+    "2d_compressed": {
+        "description": "2D Mode with 4 waves (High Compression)",
+        "num_harmonics": 3,
+        "adaptive_freqs": True,
+        "per_neuron_coeffs": False,
+        "l1_penalty": 0.0,
+        "num_waves": 4,
+        "wave_mode": "outer_product"
     }
 }
 
 # Select which experiments to run (comment out to skip)
 ACTIVE_EXPERIMENTS = [
-    "baseline",
-    "rich_harmonics",
-    # "adaptive", 
-    # "sparse",
-    # "per_neuron"
+    "1d_high_capacity",
+    "2d_compressed"
 ]
 
 def run_experiment(exp_name, exp_config, device):
     """Run a single experiment configuration."""
+    # Get num_waves from config or use default
+    n_waves = exp_config.get('num_waves', NUM_WAVES)
+    
     console.print()
     console.print(Panel(
         f"[bold yellow]EXPERIMENT: {exp_name.upper()}[/]\n"
         f"[dim]{exp_config['description']}[/]\n\n"
-        f"[cyan]Config:[/] harmonics={exp_config['num_harmonics']}, adaptive={exp_config['adaptive_freqs']}, "
+        f"[cyan]Config:[/] harmonics={exp_config['num_harmonics']}, waves={n_waves}, adaptive={exp_config['adaptive_freqs']}, "
         f"per_neuron={exp_config['per_neuron_coeffs']}, L1={exp_config['l1_penalty']}",
         title=f"📊 Experiment {ACTIVE_EXPERIMENTS.index(exp_name) + 1}/{len(ACTIVE_EXPERIMENTS)}",
         border_style="yellow"
@@ -89,12 +107,12 @@ def run_experiment(exp_name, exp_config, device):
         if m in ["UserWave", "GatedWave"]:
             # Spectral layers with Fourier configuration
             results[m] = train_fit(
-                m, NUM_WAVES, NUM_EPOCHS, device,
+                m, n_waves, NUM_EPOCHS, device,
                 num_harmonics=exp_config['num_harmonics'],
                 adaptive_freqs=exp_config['adaptive_freqs'],
                 per_neuron_coeffs=exp_config['per_neuron_coeffs'],
                 l1_penalty=exp_config['l1_penalty'],
-                wave_mode=WAVE_MODE  # Use global WAVE_MODE setting
+                wave_mode=exp_config.get('wave_mode', WAVE_MODE) # Allow overriding wave_mode per experiment
             )
         else:
             # Other models use default settings

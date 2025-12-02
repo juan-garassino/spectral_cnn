@@ -37,12 +37,12 @@ class UserWaveLinear(nn.Module):
         
         elif wave_mode == "fourier_series":
             # 1D Fourier series approach - smooth sinusoidal waves
-            # Base frequencies for each wave
-            init_freqs = torch.tensor([float(i+1) for i in range(num_waves)]).float()
+            # Fully learnable base frequencies (initialized randomly for max flexibility)
+            init_freqs = torch.rand(num_waves) * 10.0 + 0.5  # Random frequencies in [0.5, 10.5]
             self.freqs = nn.Parameter(init_freqs)
             
             # Learnable phase shifts for each wave
-            self.phases = nn.Parameter(torch.randn(num_waves) * 0.1)
+            self.phases = nn.Parameter(torch.rand(num_waves) * 2 * np.pi)  # Random phases [0, 2π]
         
         # Harmonic multipliers (1×, 2×, 4×, 8×, ...)
         if adaptive_freqs:
