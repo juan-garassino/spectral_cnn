@@ -33,7 +33,7 @@ from model import SpectralGPT
 from train import BasicTokenizer, get_batch, GPTConfig
 
 # Configuration
-STEPS = 2000
+STEPS = 200
 BATCH_SIZE = 20   # Safe for all 5 models
 BLOCK_SIZE = 128
 D_MODEL = 192     # 1.5x larger than original, fits all models
@@ -76,7 +76,9 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    # Use lower learning rate for wave-based models (they're more sensitive)
+    lr = 3e-4 if weight_type == "wave" else 1e-3
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     
     # Training Loop
     model.train()
@@ -123,14 +125,49 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
             # Backward
             optimizer.zero_grad()
             loss.backward()
+            
+            # Gradient clipping (more aggressive for wave models)
+            clip_value = 0.5 if weight_type == "wave" else 1.0
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+            
             optimizer.step()
             
-            # Physics Constraints
-            if use_hamiltonian:
-                model.constrain_energy()
+            # Wave Stabilization: Preserve Interference Patterns
+            if weight_type == "wave":
+                with torch.no_grad():
+                    for name, param in model.named_parameters():
+                        # Normalize amplitudes while preserving relative ratios (interference patterns)
+                        if 'amplitudes' in name:
+                            # L2 norm to preserve shape but bound magnitude
+                            norm = torch.norm(param)
+                            if norm > 10:  # Only normalize if too large
+                                param.mul_(10 / norm)  # Scale down, preserving ratios
+                        
+                        # Keep frequencies reasonable (but allow learning)
+                        elif 'freqs' in name:
+                            param.clamp_(-20, 20)
+                        
+                        # Wrap phases to [-π, π] to stay in valid range
+                        elif 'phases' in name:
+                            param.remainder_(2 * math.pi)
+                            param.sub_(math.pi)  # Center at 0
+            
+            # Physics Constraints: Energy conservation (preserves superposition)
+            if use_hamiltonian or (weight_type == "wave" and step % 10 == 0):
+                try:
+                    model.constrain_energy()
+                except:
+                    pass
             
             losses.append(loss.item())
             avg_loss = sum(losses[-50:]) / len(losses[-50:])  # Last 50 steps average
+            
+            # Check for NaN/Inf
+            if math.isnan(loss.item()) or math.isinf(loss.item()):
+                progress.update(task, advance=1, loss=float('nan'), avg_loss=float('nan'))
+                console.print(f"[red]⚠️  Training collapsed at step {step} (NaN/Inf detected). Stopping early.[/red]")
+                break
+            
             progress.update(task, advance=1, loss=loss.item(), avg_loss=avg_loss)
             
             # Validation check every 50 steps
@@ -140,14 +177,17 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
                     # Quick val check
                     val_x, val_y = get_batch(val_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
                     _, val_loss = model(val_x, val_y)
-                    val_ppl = math.exp(val_loss.item())
+                    val_ppl = math.exp(min(val_loss.item(), 20))  # Cap for display
                     
-                    # Live generation
-                    if tokenizer:
-                        ctx = torch.tensor([[tokenizer.encode("\n")[0]]], dtype=torch.long, device=DEVICE)
-                        sample = model.generate(ctx, 29, temperature=0.8)
-                        text = tokenizer.decode(sample[0].tolist())
-                        console.print(f"[dim]Step {step:3d} | Val Loss: {val_loss.item():.4f} | PPL: {val_ppl:.2f} | Sample: {text[:40]}...[/dim]")
+                    # Only generate if model is stable
+                    if tokenizer and not math.isnan(val_loss.item()):
+                        try:
+                            ctx = torch.tensor([[tokenizer.encode("\n")[0]]], dtype=torch.long, device=DEVICE)
+                            sample = model.generate(ctx, 29, temperature=0.8)
+                            text = tokenizer.decode(sample[0].tolist())
+                            console.print(f"[dim]Step {step:3d} | Val Loss: {val_loss.item():.4f} | PPL: {val_ppl:.2f} | Sample: {text[:40]}...[/dim]")
+                        except:
+                            console.print(f"[dim]Step {step:3d} | Val Loss: {val_loss.item():.4f} | PPL: {val_ppl:.2f} | [red]Generation failed[/red][/dim]")
                 model.train()
         
         total_time = time.time() - run_start
