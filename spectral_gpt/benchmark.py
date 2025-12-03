@@ -178,6 +178,23 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     
     tokens_per_sec = (STEPS * BATCH_SIZE * BLOCK_SIZE) / total_time
     
+    # Check if model collapsed
+    if len(losses) == 0 or math.isnan(losses[-1]) or math.isinf(losses[-1]):
+        console.print("[red]⚠️  Model training collapsed. Skipping evaluation.[/red]")
+        return {
+            "Model": config_name,
+            "Layer": layer_type,
+            "Weights": weight_type,
+            "Params": params,
+            "Speed (tok/s)": 0,
+            "Memory (MB)": 0,
+            "Train Loss": float('nan'),
+            "Val Loss": float('nan'),
+            "Perplexity": float('nan'),
+            "Time (s)": round(total_time, 2),
+            "loss_history": losses
+        }
+    
     # Evaluation
     console.print("📈 Evaluating...")
     model.eval()
@@ -273,9 +290,9 @@ def main():
     
     # Configurations to Test
     # Format: (Name, Layer, Weight, InitMode, UseHamiltonian, UseCollapse, Activation)
+    # Note: Spectral Transformer (attention + wave) removed due to instability at large scale
     configs = [
         ("Classic Transformer", "attention", "standard", "standard", False, False, "gelu"),
-        ("Spectral Transformer", "attention", "wave", "standard", False, False, "gelu"),
         ("FFT Mixer (GFNet)", "fft", "standard", "standard", False, False, "gelu"),
         ("Full Spectral", "fft", "wave", "standard", False, False, "gelu"),
         ("Physics Spectral ⚛️", "fft", "wave", "holographic", True, True, "modulate"),
