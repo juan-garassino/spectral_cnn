@@ -4,54 +4,117 @@ import torch
 import os
 
 def plot_results(results, modes, base_dir, num_epochs):
-    print("\n[Generating Plots...]")
+    print("\n[Generating Enhanced Visualization Dashboard...]")
     N = len(modes)
-
-    # Heatmaps
-    plt.figure(figsize=(3*N, 3))
+    
+    # Create a comprehensive dashboard figure with new layout
+    # Grid: [Explanations (2 cols)] / [Weight | Frequency] x N models / [Learning Curves (2 cols)] / [Table (2 cols)]
+    fig = plt.figure(figsize=(14, 6 + N * 3))
+    gs = fig.add_gridspec(N + 3, 2, hspace=0.4, wspace=0.3,
+                          left=0.08, right=0.95, top=0.94, bottom=0.05)
+    
+    # Title
+    fig.suptitle('Spectral CNN: Comprehensive Model Analysis Dashboard', 
+                 fontsize=16, fontweight='bold')
+    
+    # === ROW 0: Combined Explanations (Spanning both columns) ===
+    ax_exp = fig.add_subplot(gs[0, :])
+    ax_exp.axis('off')
+    
+    exp_text = """
+    📊 UNDERSTANDING THE VISUALIZATIONS
+    
+    WEIGHT PATTERNS (Left Column - Spatial Domain)          |    FREQUENCY ANALYSIS (Right Column - Spectral Domain)
+    • First layer weights reshaped to 28×28 images          |    • 2D Fourier Transform of weight patterns
+    • Shows what each neuron "looks for" in the input        |    • Center = Low frequencies (smooth patterns)
+    • Spectral models use wave interference patterns         |    • Edges = High frequencies (sharp details/edges)
+    • Bright = High values, Dark = Low values                |    • Reveals if model uses smooth vs detailed features
+    
+    LEARNING CURVES (Bottom): Test accuracy over training epochs. Steep = fast learning, Flat = converged, Higher = better.
+    """
+    
+    ax_exp.text(0.5, 0.5, exp_text, fontsize=10, verticalalignment='center', 
+                horizontalalignment='center', family='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.4, pad=1))
+    
+    # === ROWS 1 to N: Weight Patterns (Col 0) and Frequency Analysis (Col 1) ===
     for i, m in enumerate(modes):
         model = results[m]['model']
         W = model.get_first_layer_weight().detach().cpu().numpy()
         W_neuron0 = W[0].reshape(28, 28)
-
-        plt.subplot(1, N, i+1)
-        plt.imshow(W_neuron0, cmap='viridis')
-        plt.title(f"{m}\n{results[m]['test_acc']:.1f}%")
-        plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(f"{base_dir}/weight_patterns.png")
-    plt.close()
-
-    # FFT
-    plt.figure(figsize=(3*N, 3))
-    for i, m in enumerate(modes):
-        model = results[m]['model']
-        W = model.get_first_layer_weight().detach().cpu().numpy()
-        W_neuron0 = W[0].reshape(28, 28)
+        
+        # Column 0: Weight Pattern
+        ax_weight = fig.add_subplot(gs[i + 1, 0])
+        im1 = ax_weight.imshow(W_neuron0, cmap='viridis')
+        ax_weight.set_title(f"{m} - Weight Pattern\nAcc: {results[m]['test_acc']:.1f}%", 
+                           fontsize=11, fontweight='bold')
+        ax_weight.axis('off')
+        plt.colorbar(im1, ax=ax_weight, fraction=0.046, pad=0.04)
+        
+        # Column 1: Frequency Analysis
+        ax_freq = fig.add_subplot(gs[i + 1, 1])
         f_transform = np.fft.fft2(W_neuron0)
         f_shift = np.fft.fftshift(f_transform)
         magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1e-9)
-
-        plt.subplot(1, N, i+1)
-        plt.imshow(magnitude_spectrum, cmap='inferno')
-        plt.title(f"{m} FFT")
-        plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(f"{base_dir}/frequency_analysis.png")
-    plt.close()
-
-    # Loss Curves
-    plt.figure(figsize=(10, 6))
+        
+        im2 = ax_freq.imshow(magnitude_spectrum, cmap='inferno')
+        ax_freq.set_title(f"{m} - Frequency Spectrum (FFT)", 
+                         fontsize=11, fontweight='bold')
+        ax_freq.axis('off')
+        plt.colorbar(im2, ax=ax_freq, fraction=0.046, pad=0.04)
+    
+    # === ROW N+1: Learning Curves (Spanning both columns) ===
+    ax_train = fig.add_subplot(gs[N + 1, :])
     for m in modes:
         hist = results[m]['history']
-        plt.plot(hist['test_acc'], label=f"{m} (Test)", linewidth=2)
-    plt.xlabel("Epochs")
-    plt.ylabel("Accuracy %")
-    plt.title(f"Learning Curves ({num_epochs} Epochs)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig(f"{base_dir}/training_dynamics.png")
+        ax_train.plot(hist['test_acc'], label=f"{m}", linewidth=2.5, marker='o', markersize=5)
+    
+    ax_train.set_xlabel("Epochs", fontsize=12, fontweight='bold')
+    ax_train.set_ylabel("Test Accuracy (%)", fontsize=12, fontweight='bold')
+    ax_train.set_title(f"Training Dynamics - Learning Curves ({num_epochs} Epochs)", 
+                      fontsize=13, fontweight='bold')
+    ax_train.legend(loc='lower right', fontsize=10, framealpha=0.9)
+    ax_train.grid(True, alpha=0.3, linestyle='--')
+    ax_train.set_ylim([0, 100])
+    
+    # === ROW N+2: Performance Summary Table (Spanning both columns) ===
+    ax_table = fig.add_subplot(gs[N + 2, :])
+    ax_table.axis('off')
+    
+    # Create summary table
+    table_data = []
+    table_data.append(['Model', 'Test Acc', 'Train Acc', 'Parameters', 'Inference Speed'])
+    for m in modes:
+        r = results[m]
+        table_data.append([
+            m,
+            f"{r['test_acc']:.2f}%",
+            f"{r['train_acc']:.2f}%",
+            f"{r['params']:,}",
+            f"{r['inference_speed']:.0f} samples/s"
+        ])
+    
+    table = ax_table.table(cellText=table_data, cellLoc='center', loc='center',
+                           colWidths=[0.18, 0.14, 0.14, 0.18, 0.22])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2.2)
+    
+    # Style header row
+    for i in range(5):
+        table[(0, i)].set_facecolor('#4CAF50')
+        table[(0, i)].set_text_props(weight='bold', color='white', fontsize=11)
+    
+    # Alternate row colors
+    for i in range(1, len(table_data)):
+        color = '#f0f0f0' if i % 2 == 0 else 'white'
+        for j in range(5):
+            table[(i, j)].set_facecolor(color)
+    
+    plt.savefig(f"{base_dir}/comprehensive_dashboard.png", dpi=150, bbox_inches='tight')
     plt.close()
+    
+    print(f"✅ Dashboard saved: {base_dir}/comprehensive_dashboard.png")
 
 def plot_layer_waves(model, mode_name, base_dir):
     """
@@ -83,14 +146,23 @@ def plot_layer_waves(model, mode_name, base_dir):
         plt.title(f"Wave {i}\n(2D)", fontsize=9)
         plt.axis('off')
         
-        # Row 2: 1D Cross-section (Middle Row) - This shows the sinusoidal nature
+        # Row 2: 3 Slices (Top, Mid, Bottom)
         plt.subplot(3, waves_to_plot, i+1 + waves_to_plot)
-        mid_row = wave_2d[side//2, :]
-        plt.plot(mid_row, linewidth=1.5)
-        plt.title(f"1D Slice", fontsize=9)
+        
+        # Slice indices
+        idx_top = 1 # Avoid 0 just in case
+        idx_mid = side // 2
+        idx_bot = side - 2
+        
+        plt.plot(wave_2d[idx_top, :], color='red', alpha=0.6, linewidth=1, label='Top')
+        plt.plot(wave_2d[idx_mid, :], color='green', alpha=0.6, linewidth=1, label='Mid')
+        plt.plot(wave_2d[idx_bot, :], color='blue', alpha=0.6, linewidth=1, label='Bot')
+        
+        plt.title(f"3 Slices", fontsize=9)
         plt.grid(True, alpha=0.3)
-        max_amp = max(np.abs(waves[:waves_to_plot, 0, :]).max(), 1e-8)  # Prevent zero range
+        max_amp = max(np.abs(waves[:waves_to_plot, 0, :]).max(), 1e-8)
         plt.ylim(-max_amp, max_amp)
+        if i == 0: plt.legend(fontsize=6)
         
     # Row 3: Superposition (how waves combine)
     plt.subplot(3, 1, 3)
@@ -160,7 +232,11 @@ def plot_wave_decomposition(model, mode_name, base_dir, wave_idx=0):
         plt.legend(fontsize=7)
     
     # Row 2: Combined Wave
-    plt.subplot(3, 2, (min(num_harmonics, 8) + 1) // min(num_harmonics, 8) * 2 - 1)
+    # We switch to a 3x2 grid for the rest of the plot
+    # Indices 1,2 are Row 1 (but we used 3xN there, so we skip to Row 2)
+    # Row 2 corresponds to indices 3 and 4 in a 3x2 grid
+    
+    plt.subplot(3, 2, 3)
     combined_wave = sum(comp_data[f'comp{h+1}'].detach().cpu().numpy() for h in range(num_harmonics))
     combined_2d = combined_wave[0, :].reshape(side, side)
     mid_row_combined = combined_2d[side//2, :]
@@ -181,7 +257,7 @@ def plot_wave_decomposition(model, mode_name, base_dir, wave_idx=0):
     plt.legend(fontsize=7, ncol=2)
     
     # 2D Heatmap of combined wave
-    plt.subplot(3, 2, (min(num_harmonics, 8) + 1) // min(num_harmonics, 8) * 2)
+    plt.subplot(3, 2, 4)
     plt.imshow(combined_2d, cmap='viridis')
     plt.title("Combined Wave (2D Heatmap)", fontweight='bold', fontsize=12)
     plt.axis('off')

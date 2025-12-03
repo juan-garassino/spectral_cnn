@@ -9,23 +9,76 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 import numpy as np
-from src.models.networks import UniversalMLP
+from src.models.networks import UniversalMLP, SpectralCNN
 
 console = Console()
 
 # Configuration
 BATCH_SIZE = 512
 LR_PHASE, LR_AMP, LR_BIAS = 1e-3, 1e-3, 1e-2
+LR_LOW_FREQ, LR_MID_FREQ, LR_HIGH_FREQ = 1e-3, 5e-4, 2e-4  # Different LRs per freq band
 
-def get_optimizer(model, mode):
-    if mode == "Standard": return torch.optim.Adam(model.parameters(), lr=LR_BIAS)
-    phase, amp, bias = [], [], []
-    for name, p in model.named_parameters():
-        if 'bias' in name: bias.append(p)
-        elif any(k in name for k in ['u', 'v', 'U', 'V', 'net']): phase.append(p)
-        elif any(k in name for k in ['amp', 'coeff', 'fourier_coeffs']): amp.append(p)  # Fourier coefficients get amp LR
-        else: phase.append(p)
-    return torch.optim.Adam([{'params':phase,'lr':LR_PHASE},{'params':amp,'lr':LR_AMP},{'params':bias,'lr':LR_BIAS}])
+def get_optimizer(model, mode, frequency_aware=False):
+    """
+    Create optimizer with optional frequency-aware learning rates.
+    
+    Args:
+        model: The neural network model
+        mode: Model type (Standard, UserWave, etc.)
+        frequency_aware: If True, use different learning rates for different frequency bands
+    """
+    if mode == "Standard": 
+        return torch.optim.Adam(model.parameters(), lr=LR_BIAS)
+    
+    if not frequency_aware:
+        # Original approach: group by parameter type
+        phase, amp, bias = [], [], []
+        for name, p in model.named_parameters():
+            if 'bias' in name: bias.append(p)
+            elif any(k in name for k in ['u', 'v', 'U', 'V', 'net']): phase.append(p)
+            elif any(k in name for k in ['amp', 'coeff', 'fourier_coeffs']): amp.append(p)
+            else: phase.append(p)
+        return torch.optim.Adam([
+            {'params': phase, 'lr': LR_PHASE},
+            {'params': amp, 'lr': LR_AMP},
+            {'params': bias, 'lr': LR_BIAS}
+        ])
+    
+    else:
+        # Frequency-aware approach: separate learning rates per frequency band
+        phase, bias = [], []
+        low_freq_coeffs, mid_freq_coeffs, high_freq_coeffs = [], [], []
+        amplitudes = []
+        
+        for name, p in model.named_parameters():
+            if 'bias' in name:
+                bias.append(p)
+            elif 'fourier_coeffs' in name:
+                # Split Fourier coefficients by frequency band
+                # We'll need to access the layer to know num_harmonics
+                # For now, we'll add them to separate groups based on the parameter structure
+                # This requires the layer to expose the harmonics separately
+                # For simplicity, we'll just use different LRs for all coeffs for now
+                # TODO: Implement per-harmonic grouping
+                low_freq_coeffs.append(p)  # Placeholder - will improve
+            elif any(k in name for k in ['u', 'v', 'U', 'V', 'net']):
+                phase.append(p)
+            elif 'amplitudes' in name:
+                amplitudes.append(p)
+            else:
+                phase.append(p)
+        
+        param_groups = [
+            {'params': phase, 'lr': LR_PHASE, 'name': 'phase'},
+            {'params': low_freq_coeffs, 'lr': LR_LOW_FREQ, 'name': 'low_freq'},
+            {'params': amplitudes, 'lr': LR_MID_FREQ, 'name': 'amplitudes'},
+            {'params': bias, 'lr': LR_BIAS, 'name': 'bias'}
+        ]
+        
+        # Filter out empty groups
+        param_groups = [g for g in param_groups if len(g['params']) > 0]
+        
+        return torch.optim.Adam(param_groups)
 
 def train_fit(mode_name, num_waves, num_epochs, device, num_harmonics=3, 
              adaptive_freqs=False, per_neuron_coeffs=False, l1_penalty=0.0, wave_mode="outer_product"):
@@ -37,9 +90,14 @@ def train_fit(mode_name, num_waves, num_epochs, device, num_harmonics=3,
     train_loader = DataLoader(datasets.MNIST("./data", train=True, download=True, transform=transform), batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(datasets.MNIST("./data", train=False, download=True, transform=transform), batch_size=256, shuffle=False)
 
-    model = UniversalMLP(mode_name, num_waves, num_harmonics=num_harmonics,
-                        adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
-                        wave_mode=wave_mode).to(device)
+    if mode_name == "SpectralCNN":
+        model = SpectralCNN(num_waves=num_waves, num_harmonics=num_harmonics,
+                            adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                            wave_mode=wave_mode).to(device)
+    else:
+        model = UniversalMLP(mode_name, num_waves, num_harmonics=num_harmonics,
+                            adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                            wave_mode=wave_mode).to(device)
     if torch.cuda.device_count() > 1: model = nn.DataParallel(model)
     opt = get_optimizer(model, mode_name)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=5)

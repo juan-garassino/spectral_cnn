@@ -56,3 +56,62 @@ class UniversalMLP(nn.Module):
     def get_first_layer_weight(self):
         if self.type == "Standard": return self.fc1.weight
         return self.fc1.get_weight()
+
+class SpectralCNN(nn.Module):
+    def __init__(self, num_waves=12, num_harmonics=3, 
+                 adaptive_freqs=False, per_neuron_coeffs=False, wave_mode="outer_product"):
+        super().__init__()
+        from .layers import SpectralConv2d, UserWaveLinear
+        
+        self.type = "SpectralCNN"
+        
+        # Spectral Convolutional Layers
+        # Input: 1x28x28
+        self.conv1 = SpectralConv2d(1, 16, kernel_size=5, stride=1, padding=2,
+                                  num_waves=num_waves, num_harmonics=num_harmonics,
+                                  adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                                  wave_mode=wave_mode)
+        # Output: 16x28x28 -> MaxPool -> 16x14x14
+        
+        self.conv2 = SpectralConv2d(16, 32, kernel_size=5, stride=1, padding=2,
+                                  num_waves=num_waves, num_harmonics=num_harmonics,
+                                  adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                                  wave_mode=wave_mode)
+        # Output: 32x14x14 -> MaxPool -> 32x7x7
+        
+        # Fully Connected Layer (Spectral)
+        # Input: 32*7*7 = 1568
+        self.fc1 = UserWaveLinear(32*7*7, 10, 
+                                num_waves=num_waves, num_harmonics=num_harmonics,
+                                adaptive_freqs=adaptive_freqs, per_neuron_coeffs=per_neuron_coeffs,
+                                wave_mode=wave_mode)
+        
+    def forward(self, x):
+        # Conv 1
+        x = x.view(-1, 1, 28, 28) # Ensure 4D input
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(x, 2)
+        
+        # Conv 2
+        x = F.relu(self.conv2(x))
+        x = F.max_pool2d(x, 2)
+        
+        # Flatten
+        x = x.view(x.size(0), -1)
+        
+        # FC
+        x = self.fc1(x)
+        return x
+
+    def constrain_all(self):
+        self.conv1.constrain_all()
+        self.conv2.constrain_all()
+        self.fc1.constrain()
+    
+    def get_l1_loss(self):
+        return self.conv1.get_l1_loss() + self.conv2.get_l1_loss() + self.fc1.get_l1_loss()
+    
+    def get_first_layer_weight(self):
+        # Return first conv layer weights for visualization
+        # Shape: [16, 1, 5, 5]
+        return self.conv1.weight_gen.get_weight().view(16, 1, 5, 5)

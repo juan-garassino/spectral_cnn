@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 # 1. USER WAVE
-class UserWaveLinear(nn.Module):
     def __init__(self, in_dim, out_dim, num_waves=12, num_harmonics=3, 
-                 adaptive_freqs=False, per_neuron_coeffs=False, wave_mode="outer_product"):
+                 adaptive_freqs=False, per_neuron_coeffs=False, wave_mode="outer_product",
+                 force_linear_coords=False, init_mode="standard"):
         """
         Args:
             in_dim: Input dimension
@@ -15,6 +16,8 @@ class UserWaveLinear(nn.Module):
             adaptive_freqs: If True, harmonic frequencies are learnable (default: False, uses [1, 2, 4, 8, ...])
             per_neuron_coeffs: If True, each output neuron has its own coefficients (default: False, shared)
             wave_mode: "outer_product" (2D patterns) or "fourier_series" (1D smooth sinusoids)
+            force_linear_coords: If True, forces u and v to be linear ramps [0, 1] (frozen)
+            init_mode: "standard", "dft", "holographic", "standing_wave" (Physics-First strategies)
         """
         super().__init__()
         self.num_waves = num_waves
@@ -22,29 +25,55 @@ class UserWaveLinear(nn.Module):
         self.adaptive_freqs = adaptive_freqs
         self.per_neuron_coeffs = per_neuron_coeffs
         self.wave_mode = wave_mode
+        self.force_linear_coords = force_linear_coords
+        self.init_mode = init_mode
         self.in_dim = in_dim
         self.out_dim = out_dim
         
         if wave_mode == "outer_product":
             # Original 2D outer product approach
             rank = 1
-            self.u = nn.Parameter(torch.randn(num_waves, out_dim, rank) * 1.0)
-            self.v = nn.Parameter(torch.randn(num_waves, in_dim, rank) * 1.0)
+            if force_linear_coords:
+                # Force coordinates to be linear ramps [1.0, 10.0]
+                u_linspace = torch.linspace(1.0, 10.0, out_dim).reshape(1, out_dim, 1).repeat(num_waves, 1, 1)
+                v_linspace = torch.linspace(1.0, 10.0, in_dim).reshape(1, in_dim, 1).repeat(num_waves, 1, 1)
+                self.u = nn.Parameter(u_linspace, requires_grad=False)
+                self.v = nn.Parameter(v_linspace, requires_grad=False)
+            else:
+                self.u = nn.Parameter(torch.randn(num_waves, out_dim, rank) * 1.0)
+                self.v = nn.Parameter(torch.randn(num_waves, in_dim, rank) * 1.0)
             
             # Base frequency per wave
-            init_freqs = torch.tensor([1.5**i for i in range(num_waves)]).float()
+            if init_mode == "dft":
+                # DFT Basis: Frequencies are exact harmonics
+                init_freqs = torch.arange(1, num_waves + 1).float()
+            else:
+                init_freqs = torch.tensor([1.5**i for i in range(num_waves)]).float()
+                
+            if force_linear_coords:
+                init_freqs *= 10.0 
             self.freqs = nn.Parameter(init_freqs.view(num_waves, 1, 1))
         
-        elif wave_mode == "fourier_series":
-            # 1D Fourier series approach - smooth sinusoidal waves
-            # Fully learnable base frequencies (initialized randomly for max flexibility)
-            init_freqs = torch.rand(num_waves) * 10.0 + 0.5  # Random frequencies in [0.5, 10.5]
-            self.freqs = nn.Parameter(init_freqs)
+        elif wave_mode == "gabor":
+            # Gabor Wavelet approach
+            if init_mode == "standing_wave":
+                # Standing Wave: Gaussian packets centered at regular intervals
+                self.centers = nn.Parameter(torch.linspace(0, 1, num_waves))
+                self.sigmas = nn.Parameter(torch.ones(num_waves) * (1.0 / num_waves)) # Narrow packets
+            else:
+                self.centers = nn.Parameter(torch.rand(num_waves))
+                self.sigmas = nn.Parameter(torch.rand(num_waves) * 0.1 + 0.05)
             
-            # Learnable phase shifts for each wave
-            self.phases = nn.Parameter(torch.rand(num_waves) * 2 * np.pi)  # Random phases [0, 2π]
+            if init_mode == "dft":
+                init_freqs = torch.arange(1, num_waves + 1).float() * 2.0 * np.pi
+                self.freqs = nn.Parameter(init_freqs)
+                self.phases = nn.Parameter(torch.zeros(num_waves)) # Phase 0 for DFT
+            else:
+                init_freqs = torch.rand(num_waves) * 10.0 + 0.5
+                self.freqs = nn.Parameter(init_freqs)
+                self.phases = nn.Parameter(torch.rand(num_waves) * 2 * np.pi)
         
-        # Harmonic multipliers (1×, 2×, 4×, 8×, ...)
+        # Harmonic multipliers
         if adaptive_freqs:
             init_harm_freqs = torch.tensor([2.0**i for i in range(num_harmonics)]).float()
             self.harmonic_freqs = nn.Parameter(init_harm_freqs)
@@ -54,28 +83,72 @@ class UserWaveLinear(nn.Module):
         # Fourier coefficients
         if per_neuron_coeffs:
             init_coeffs = torch.randn(num_waves, out_dim, num_harmonics) * 0.1
-            for h in range(num_harmonics):
-                init_coeffs[:, :, h] += (0.5 ** h)
-            self.fourier_coeffs = nn.Parameter(init_coeffs)
         else:
             init_coeffs = torch.randn(num_waves, num_harmonics) * 0.1
+            
+        if init_mode == "holographic":
+            # Holographic Init: 1/f decay for coefficients (Pink Noise)
             for h in range(num_harmonics):
-                init_coeffs[:, h] += (0.5 ** h)
-            self.fourier_coeffs = nn.Parameter(init_coeffs)
-        
-        # Overall amplitude per wave (in fourier_series mode, this is per output neuron per wave)
-        if wave_mode == "fourier_series":
-            self.amplitudes = nn.Parameter(torch.randn(out_dim, num_waves) * 0.1)
+                scale = 1.0 / (h + 1)
+                if per_neuron_coeffs:
+                    init_coeffs[:, :, h] *= scale
+                else:
+                    init_coeffs[:, h] *= scale
         else:
-            self.amplitudes = nn.Parameter(torch.randn(num_waves) * 0.1)
+            # Standard gentle init
+            for h in range(num_harmonics):
+                if per_neuron_coeffs:
+                    init_coeffs[:, :, h] += 0.5 + (h / num_harmonics) * 0.2
+                else:
+                    init_coeffs[:, h] += 0.5 + (h / num_harmonics) * 0.2
+                    
+        self.fourier_coeffs = nn.Parameter(init_coeffs)
         
+        # Amplitudes
+        if wave_mode in ["fourier_series", "gabor"]:
+            amp_init = torch.randn(out_dim, num_waves) * 0.1
+        else:
+            amp_init = torch.randn(num_waves) * 0.1
+            
+        if init_mode == "holographic":
+            # Holographic: 1/f decay for wave amplitudes
+            for w in range(num_waves):
+                scale = 1.0 / (w + 1)
+                if wave_mode in ["fourier_series", "gabor"]:
+                    amp_init[:, w] = torch.randn(out_dim) * 0.1 * scale
+                else:
+                    amp_init[w] = torch.randn(1) * 0.1 * scale
+        elif init_mode != "dft": # DFT keeps uniform amplitudes initially
+            for w in range(num_waves):
+                freq_boost = 1.0 + (w / num_waves) * 0.2
+                if wave_mode in ["fourier_series", "gabor"]:
+                    amp_init[:, w] += 0.08 * freq_boost
+                else:
+                    amp_init[w] += 0.08 * freq_boost
+                    
+        self.amplitudes = nn.Parameter(amp_init)
         self.bias = nn.Parameter(torch.zeros(out_dim))
+
+    def constrain_energy(self):
+        """Hamiltonian Descent: Normalize amplitudes to conserve energy."""
+        with torch.no_grad():
+            # Normalize amplitudes to have unit norm
+            if self.wave_mode in ["fourier_series", "gabor"]:
+                # Per-neuron amplitudes [out_dim, num_waves]
+                norm = torch.norm(self.amplitudes, p=2, dim=1, keepdim=True)
+                self.amplitudes.data.div_(norm + 1e-8)
+            else:
+                # Shared amplitudes [num_waves]
+                norm = torch.norm(self.amplitudes, p=2)
+                self.amplitudes.data.div_(norm + 1e-8)
 
     def forward(self, x):
         if self.wave_mode == "outer_product":
             return self._forward_outer_product(x)
-        else:
+        elif self.wave_mode == "fourier_series":
             return self._forward_fourier_series(x)
+        else:
+            return self._forward_gabor(x)
     
     def _forward_outer_product(self, x):
         """Original 2D outer product approach"""
@@ -129,12 +202,47 @@ class UserWaveLinear(nn.Module):
         
         return x @ W.t() + self.bias
 
+    def _forward_gabor(self, x):
+        """Gabor Wavelet approach - Gaussian-windowed sinusoids"""
+        positions = torch.arange(self.in_dim, dtype=torch.float32, device=x.device) / self.in_dim
+        W = torch.zeros(self.out_dim, self.in_dim, device=x.device)
+        
+        for wave_idx in range(self.num_waves):
+            # Gaussian Window
+            center = self.centers[wave_idx]
+            sigma = torch.abs(self.sigmas[wave_idx]) + 1e-6 # Ensure positive
+            gaussian = torch.exp(-((positions - center)**2) / (2 * sigma**2))
+            
+            wave_1d = torch.zeros(self.in_dim, device=x.device)
+            
+            for h in range(self.num_harmonics):
+                freq = self.freqs[wave_idx] * self.harmonic_freqs[h]
+                phase = self.phases[wave_idx]
+                
+                # Windowed Sinusoid
+                harmonic = gaussian * torch.cos(2 * np.pi * freq * positions + phase)
+                
+                if self.per_neuron_coeffs:
+                    for out_idx in range(self.out_dim):
+                        W[out_idx, :] += (self.fourier_coeffs[wave_idx, out_idx, h] * 
+                                         self.amplitudes[out_idx, wave_idx] * harmonic)
+                else:
+                    wave_1d += self.fourier_coeffs[wave_idx, h] * harmonic
+            
+            if not self.per_neuron_coeffs:
+                for out_idx in range(self.out_dim):
+                    W[out_idx, :] += self.amplitudes[out_idx, wave_idx] * wave_1d
+                    
+        return x @ W.t() + self.bias
+
     def get_weight(self):
         with torch.no_grad():
             if self.wave_mode == "outer_product":
                 return self._get_weight_outer_product()
-            else:
+            elif self.wave_mode == "fourier_series":
                 return self._get_weight_fourier_series()
+            else:
+                return self._get_weight_gabor()
     
     def _get_weight_outer_product(self):
         theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
@@ -172,14 +280,43 @@ class UserWaveLinear(nn.Module):
                 for out_idx in range(self.out_dim):
                     W[out_idx, :] += self.amplitudes[out_idx, wave_idx] * wave_1d
         return W
+
+    def _get_weight_gabor(self):
+        positions = torch.arange(self.in_dim, dtype=torch.float32, device=self.freqs.device) / self.in_dim
+        W = torch.zeros(self.out_dim, self.in_dim, device=self.freqs.device)
+        
+        for wave_idx in range(self.num_waves):
+            center = self.centers[wave_idx]
+            sigma = torch.abs(self.sigmas[wave_idx]) + 1e-6
+            gaussian = torch.exp(-((positions - center)**2) / (2 * sigma**2))
+            
+            wave_1d = torch.zeros(self.in_dim, device=self.freqs.device)
+            for h in range(self.num_harmonics):
+                freq = self.freqs[wave_idx] * self.harmonic_freqs[h]
+                phase = self.phases[wave_idx]
+                harmonic = gaussian * torch.cos(2 * np.pi * freq * positions + phase)
+                
+                if self.per_neuron_coeffs:
+                    for out_idx in range(self.out_dim):
+                        W[out_idx, :] += (self.fourier_coeffs[wave_idx, out_idx, h] * 
+                                         self.amplitudes[out_idx, wave_idx] * harmonic)
+                else:
+                    wave_1d += self.fourier_coeffs[wave_idx, h] * harmonic
+            
+            if not self.per_neuron_coeffs:
+                for out_idx in range(self.out_dim):
+                    W[out_idx, :] += self.amplitudes[out_idx, wave_idx] * wave_1d
+        return W
     
     def get_waves(self):
         """Returns the individual wave components for visualization."""
         with torch.no_grad():
             if self.wave_mode == "outer_product":
                 return self._get_waves_outer_product()
-            else:
+            elif self.wave_mode == "fourier_series":
                 return self._get_waves_fourier_series()
+            else:
+                return self._get_waves_gabor()
     
     def _get_waves_outer_product(self):
         theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
@@ -217,14 +354,42 @@ class UserWaveLinear(nn.Module):
             waves.append(wave_2d * (self.amplitudes[0, wave_idx] if self.wave_mode =="fourier_series" else self.amplitudes[wave_idx]))
         
         return torch.stack(waves)
+
+    def _get_waves_gabor(self):
+        """Get Gabor waves for visualization"""
+        positions = torch.arange(self.in_dim, dtype=torch.float32, device=self.freqs.device) / self.in_dim
+        waves = []
+        
+        for wave_idx in range(self.num_waves):
+            center = self.centers[wave_idx]
+            sigma = torch.abs(self.sigmas[wave_idx]) + 1e-6
+            gaussian = torch.exp(-((positions - center)**2) / (2 * sigma**2))
+            
+            wave_1d = torch.zeros(self.in_dim, device=self.freqs.device)
+            for h in range(self.num_harmonics):
+                freq = self.freqs[wave_idx] * self.harmonic_freqs[h]
+                phase = self.phases[wave_idx]
+                harmonic = gaussian * torch.cos(2 * np.pi * freq * positions + phase)
+                
+                if self.per_neuron_coeffs:
+                    wave_1d += self.fourier_coeffs[wave_idx, 0, h] * harmonic
+                else:
+                    wave_1d += self.fourier_coeffs[wave_idx, h] * harmonic
+            
+            wave_2d = wave_1d.unsqueeze(0).expand(self.out_dim, -1)
+            waves.append(wave_2d * self.amplitudes[0, wave_idx])
+        
+        return torch.stack(waves)
     
     def get_wave_components(self):
         """Returns the individual Fourier components for each wave."""
         with torch.no_grad():
             if self.wave_mode == "outer_product":
                 return self._get_components_outer_product()
-            else:
+            elif self.wave_mode == "fourier_series":
                 return self._get_components_fourier_series()
+            else:
+                return self._get_components_gabor()
     
     def _get_components_outer_product(self):
         theta = torch.bmm(self.u, self.v.transpose(1, 2)) * self.freqs
@@ -279,12 +444,105 @@ class UserWaveLinear(nn.Module):
                 comp_dict['coeffs'] = self.fourier_coeffs[wave_idx, :].clone()
             components.append(comp_dict)
         return components
+
+    def _get_components_gabor(self):
+        """Get Gabor components for visualization"""
+        positions = torch.arange(self.in_dim, dtype=torch.float32, device=self.freqs.device) / self.in_dim
+        components = []
+        
+        for wave_idx in range(self.num_waves):
+            center = self.centers[wave_idx]
+            sigma = torch.abs(self.sigmas[wave_idx]) + 1e-6
+            gaussian = torch.exp(-((positions - center)**2) / (2 * sigma**2))
+            
+            comp_dict = {}
+            for h in range(self.num_harmonics):
+                freq = self.freqs[wave_idx] * self.harmonic_freqs[h]
+                phase = self.phases[wave_idx]
+                harmonic = gaussian * torch.cos(2 * np.pi * freq * positions + phase)
+                
+                if self.per_neuron_coeffs:
+                    comp = self.fourier_coeffs[wave_idx, 0, h] * harmonic * self.amplitudes[0, wave_idx]
+                else:
+                    comp = self.fourier_coeffs[wave_idx, h] * harmonic * self.amplitudes[0, wave_idx]
+                
+                comp_dict[f'comp{h+1}'] = comp.unsqueeze(0).expand(self.out_dim, -1)
+            
+            comp_dict['theta'] = None
+            comp_dict['harmonic_freqs'] = self.harmonic_freqs.clone()
+            if self.per_neuron_coeffs:
+                comp_dict['coeffs'] = self.fourier_coeffs[wave_idx, 0, :].clone()
+            else:
+                comp_dict['coeffs'] = self.fourier_coeffs[wave_idx, :].clone()
+            components.append(comp_dict)
+        return components
     
     def get_l1_loss(self):
         """Returns L1 penalty on Fourier coefficients for sparsity."""
         return torch.abs(self.fourier_coeffs).sum()
 
     def constrain(self): pass
+    
+    def freeze_high_frequencies(self, threshold=0.5):
+        """
+        Freeze high-frequency harmonics for curriculum learning.
+        Start with low frequencies, progressively unfreeze high frequencies.
+        
+        Args:
+            threshold: Fraction of harmonics to keep trainable (0.5 = freeze top half)
+        """
+        num_to_freeze = int(self.num_harmonics * (1 - threshold))
+        freeze_start = self.num_harmonics - num_to_freeze
+        
+        # Freeze the high-frequency part of Fourier coefficients
+        if self.per_neuron_coeffs:
+            # Shape: [num_waves, out_dim, num_harmonics]
+            for i in range(freeze_start, self.num_harmonics):
+                self.fourier_coeffs.data[:, :, i].requires_grad_(False)
+        else:
+            # Shape: [num_waves, num_harmonics]
+            for i in range(freeze_start, self.num_harmonics):
+                self.fourier_coeffs.data[:, i].requires_grad_(False)
+        
+        return freeze_start
+    
+    def unfreeze_frequencies(self, up_to_harmonic=None):
+        """
+        Unfreeze frequency harmonics up to a certain index.
+        
+        Args:
+            up_to_harmonic: Index to unfreeze up to (None = unfreeze all)
+        """
+        if up_to_harmonic is None:
+            up_to_harmonic = self.num_harmonics
+        
+        self.fourier_coeffs.requires_grad_(True)
+    
+    def progressive_unfreeze_schedule(self, current_epoch, total_epochs, strategy='linear'):
+        """
+        Determine which harmonics to unfreeze based on training progress.
+        
+        Args:
+            current_epoch: Current training epoch (0-indexed)
+            total_epochs: Total number of epochs
+            strategy: 'linear' or 'exponential'
+        
+        Returns:
+            Number of harmonics that should be unfrozen
+        """
+        progress = (current_epoch + 1) / total_epochs
+        
+        if strategy == 'linear':
+            # Linearly unfreeze harmonics throughout training
+            num_unfrozen = max(1, int(progress * self.num_harmonics))
+        elif strategy == 'exponential':
+            # Start with few, rapidly unfreeze later
+            num_unfrozen = max(1, int((progress ** 2) * self.num_harmonics))
+        else:
+            num_unfrozen = self.num_harmonics
+        
+        self.unfreeze_frequencies(up_to_harmonic=num_unfrozen)
+        return num_unfrozen
 
 # 2. POLY NET
 class PolyLinear(nn.Module):
@@ -414,18 +672,35 @@ class SirenLinear(nn.Module):
 # 6. GATED WAVE NET (V14 Optimized)
 class GatedWaveLinear(nn.Module):
     def __init__(self, in_dim, out_dim, num_waves=12, num_harmonics=3, 
-                 adaptive_freqs=False, per_neuron_coeffs=False, wave_mode="outer_product"):
+                 adaptive_freqs=False, per_neuron_coeffs=False, wave_mode="outer_product",
+                 force_linear_coords=False):
         super().__init__()
-        self.signal_waves = 10
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.signal_waves = num_waves # Renamed num_waves to signal_waves for consistency
         self.num_harmonics = num_harmonics
         self.adaptive_freqs = adaptive_freqs
         self.per_neuron_coeffs = per_neuron_coeffs
-        self.wave_mode = wave_mode  # Store but currently only outer_product supported for GatedWave
+        self.wave_mode = wave_mode
+        self.force_linear_coords = force_linear_coords
         rank = 1
 
         # Signal Init
-        self.u = nn.Parameter(torch.randn(self.signal_waves, out_dim, rank) * 1.0)
-        self.v = nn.Parameter(torch.randn(self.signal_waves, in_dim, rank) * 1.0)
+        # 1. Coordinate Vectors (u, v) for Outer Product
+        # We learn the "grid" itself! 
+        # u: [signal_waves, out_dim, 1]
+        # v: [signal_waves, in_dim, 1]
+        if force_linear_coords:
+            # Force coordinates to be linear ramps [0, 1]
+            # This ensures rows/cols are perfect sine waves (with varying freq)
+            u_linspace = torch.linspace(0, 1, out_dim).reshape(1, out_dim, 1).repeat(self.signal_waves, 1, 1)
+            v_linspace = torch.linspace(0, 1, in_dim).reshape(1, in_dim, 1).repeat(self.signal_waves, 1, 1)
+            self.u = nn.Parameter(u_linspace, requires_grad=False)
+            self.v = nn.Parameter(v_linspace, requires_grad=False)
+        else:
+            # Learnable coordinates (can warp/distort)
+            self.u = nn.Parameter(torch.randn(self.signal_waves, out_dim, rank) * 1.0)
+            self.v = nn.Parameter(torch.randn(self.signal_waves, in_dim, rank) * 1.0)
         init_freqs = torch.tensor([1.5**i for i in range(self.signal_waves)]).float()
         self.freqs = nn.Parameter(init_freqs.view(self.signal_waves, 1, 1))
 
@@ -536,4 +811,161 @@ class GatedWaveLinear(nn.Module):
         return torch.abs(self.fourier_coeffs).sum()
 
     def constrain(self): pass
+
+
+# 7. SPECTRAL CONV2D
+class SpectralConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, 
+                 num_waves=12, num_harmonics=3, adaptive_freqs=False, 
+                 per_neuron_coeffs=False, wave_mode="outer_product"):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
+        self.stride = stride
+        self.padding = padding
+        
+        # We generate the weight tensor [out_channels, in_channels, kH, kW]
+        # by flattening the input dimensions: [out_channels, in_channels * kH * kW]
+        self.flat_in_dim = in_channels * self.kernel_size[0] * self.kernel_size[1]
+        self.flat_out_dim = out_channels
+        
+        # Use UserWaveLinear to generate the weights
+        self.weight_gen = UserWaveLinear(
+            self.flat_in_dim, self.flat_out_dim, 
+            num_waves=num_waves, 
+            num_harmonics=num_harmonics,
+            adaptive_freqs=adaptive_freqs,
+            per_neuron_coeffs=per_neuron_coeffs,
+            wave_mode=wave_mode
+        )
+        
+        # Bias is handled by UserWaveLinear but we need it separate for Conv2d usually,
+        # but UserWaveLinear includes a bias term in its forward/get_weight.
+        # However, UserWaveLinear.get_weight() returns just the weight matrix.
+        # UserWaveLinear.bias is a separate parameter.
+        # We can use that bias.
+
+    def forward(self, x):
+        # 1. Generate weights [out_channels, flat_in_dim]
+        w_flat = self.weight_gen.get_weight()
+        
+        # 2. Reshape to [out_channels, in_channels, kH, kW]
+        weight = w_flat.view(self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1])
+        
+        # 3. Get bias
+        bias = self.weight_gen.bias
+        
+        # 4. Convolve
+        return F.conv2d(x, weight, bias, stride=self.stride, padding=self.padding)
+    
+    def get_l1_loss(self):
+        return self.weight_gen.get_l1_loss()
+    
+    def constrain_all(self):
+        self.weight_gen.constrain()
+
+
+# 8. SPECTRAL CONV3D (Volumetric)
+class SpectralConv3d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, 
+                 num_waves=12, num_harmonics=3, adaptive_freqs=False, 
+                 per_neuron_coeffs=False, wave_mode="outer_product"):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        # Kernel size can be int or tuple (kD, kH, kW)
+        if isinstance(kernel_size, int):
+            self.kernel_size = (kernel_size, kernel_size, kernel_size)
+        else:
+            self.kernel_size = kernel_size
+            
+        self.stride = stride
+        self.padding = padding
+        
+        # We generate the weight tensor [out_channels, in_channels, kD, kH, kW]
+        # by flattening the input dimensions: [out_channels, in_channels * kD * kH * kW]
+        self.flat_in_dim = in_channels * self.kernel_size[0] * self.kernel_size[1] * self.kernel_size[2]
+        self.flat_out_dim = out_channels
+        
+        # Use UserWaveLinear to generate the weights
+        # This proves the "Universal Wave Computing" concept:
+        # The same 1D/2D wave generation logic creates 3D volumetric filters!
+        self.weight_gen = UserWaveLinear(
+            self.flat_in_dim, self.flat_out_dim, 
+            num_waves=num_waves, 
+            num_harmonics=num_harmonics,
+            adaptive_freqs=adaptive_freqs,
+            per_neuron_coeffs=per_neuron_coeffs,
+            wave_mode=wave_mode
+        )
+
+    def forward(self, x):
+        # 1. Generate weights [out_channels, flat_in_dim]
+        w_flat = self.weight_gen.get_weight()
+        
+        # 2. Reshape to [out_channels, in_channels, kD, kH, kW]
+        weight = w_flat.view(self.out_channels, self.in_channels, 
+                           self.kernel_size[0], self.kernel_size[1], self.kernel_size[2])
+        
+        # 3. Get bias
+        bias = self.weight_gen.bias
+        
+        # 4. Convolve 3D
+        return F.conv3d(x, weight, bias, stride=self.stride, padding=self.padding)
+    
+    def get_l1_loss(self):
+        return self.weight_gen.get_l1_loss()
+    
+    def constrain_all(self):
+        self.weight_gen.constrain()
+
+
+# 9. SPECTRAL CONV1D (Time Series / Audio)
+class SpectralConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, 
+                 num_waves=12, num_harmonics=3, adaptive_freqs=False, 
+                 per_neuron_coeffs=False, wave_mode="fourier_series"):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size,)
+        self.kernel_size = self.kernel_size[0]
+        
+        self.stride = stride
+        self.padding = padding
+        
+        # We generate the weight tensor [out_channels, in_channels, kW]
+        # by flattening the input dimensions: [out_channels, in_channels * kW]
+        self.flat_in_dim = in_channels * self.kernel_size
+        self.flat_out_dim = out_channels
+        
+        # Use UserWaveLinear to generate the weights
+        self.weight_gen = UserWaveLinear(
+            self.flat_in_dim, self.flat_out_dim, 
+            num_waves=num_waves, 
+            num_harmonics=num_harmonics,
+            adaptive_freqs=adaptive_freqs,
+            per_neuron_coeffs=per_neuron_coeffs,
+            wave_mode=wave_mode
+        )
+
+    def forward(self, x):
+        # 1. Generate weights [out_channels, flat_in_dim]
+        w_flat = self.weight_gen.get_weight()
+        
+        # 2. Reshape to [out_channels, in_channels, kW]
+        weight = w_flat.view(self.out_channels, self.in_channels, self.kernel_size)
+        
+        # 3. Get bias
+        bias = self.weight_gen.bias
+        
+        # 4. Convolve 1D
+        return F.conv1d(x, weight, bias, stride=self.stride, padding=self.padding)
+    
+    def get_l1_loss(self):
+        return self.weight_gen.get_l1_loss()
+    
+    def constrain_all(self):
+        self.weight_gen.constrain()
 
