@@ -42,8 +42,14 @@ HEADS = 4
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vocab_size, results_dir, 
-                  init_mode="standard", use_hamiltonian=False, use_collapse=False, activation_type="gelu"):
-    print(f"\n--- Benchmarking: {config_name} ---")
+                  init_mode="standard", use_hamiltonian=False, use_collapse=False, activation_type="gelu", tokenizer=None):
+    from rich.panel import Panel
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+    
+    console.print(Panel(f"[bold cyan]{config_name}[/bold cyan]\n"
+                       f"Layer: {layer_type} | Weights: {weight_type} | Activation: {activation_type}\n"
+                       f"Init: {init_mode} | Hamiltonian: {use_hamiltonian} | Collapse: {use_collapse}",
+                       title="🧪 Model Config", border_style="cyan"))
     
     # Reset
     if DEVICE == 'cuda':
@@ -64,10 +70,12 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     try:
         model = SpectralGPT(config).to(DEVICE)
     except Exception as e:
-        print(f"Failed to init model: {e}")
+        console.print(f"[red]Failed to init model: {e}[/red]")
         return None
 
     params = sum(p.numel() for p in model.parameters())
+    console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     
     # Training Loop
@@ -75,44 +83,79 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     losses = []
     
     # Warmup
+    console.print("🔥 Warming up...")
     for _ in range(5):
         x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
         _, _ = model(x, y)
-        
-    # Timed Run
-    run_start = time.time()
     
-    from train import get_collapse_penalty # Import here to avoid circular dependency issues if any
+    from train import get_collapse_penalty
     
-    for step in range(STEPS):
-        x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
+    # Timed Run with Progress Bar and Live Metrics
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("•"),
+        TextColumn("[yellow]Loss: {task.fields[loss]:.4f}"),
+        TextColumn("[cyan]Avg: {task.fields[avg_loss]:.4f}"),
+        TimeElapsedColumn(),
+        console=console
+    ) as progress:
         
-        # Forward
-        if DEVICE == 'cuda':
-            with torch.amp.autocast('cuda'):
+        task = progress.add_task(f"Training {config_name}", total=STEPS, loss=0.0, avg_loss=0.0)
+        run_start = time.time()
+        
+        for step in range(STEPS):
+            x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
+            
+            # Forward
+            if DEVICE == 'cuda':
+                with torch.amp.autocast('cuda'):
+                    _, loss = model(x, y)
+            else:
                 _, loss = model(x, y)
-        else:
-            _, loss = model(x, y)
+                
+            # Physics Penalties
+            if use_collapse:
+                loss += 1e-4 * get_collapse_penalty(model)
+                
+            # Backward
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
             
-        # Physics Penalties
-        if use_collapse:
-            loss += 1e-4 * get_collapse_penalty(model)
+            # Physics Constraints
+            if use_hamiltonian:
+                model.constrain_energy()
             
-        # Backward
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            losses.append(loss.item())
+            avg_loss = sum(losses[-50:]) / len(losses[-50:])  # Last 50 steps average
+            progress.update(task, advance=1, loss=loss.item(), avg_loss=avg_loss)
+            
+            # Validation check every 50 steps
+            if step % 50 == 0 and step > 0:
+                model.eval()
+                with torch.no_grad():
+                    # Quick val check
+                    val_x, val_y = get_batch(val_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
+                    _, val_loss = model(val_x, val_y)
+                    val_ppl = math.exp(val_loss.item())
+                    
+                    # Live generation
+                    if tokenizer:
+                        ctx = torch.tensor([[tokenizer.encode("\n")[0]]], dtype=torch.long, device=DEVICE)
+                        sample = model.generate(ctx, 29, temperature=0.8)
+                        text = tokenizer.decode(sample[0].tolist())
+                        console.print(f"[dim]Step {step:3d} | Val Loss: {val_loss.item():.4f} | PPL: {val_ppl:.2f} | Sample: {text[:40]}...[/dim]")
+                model.train()
         
-        # Physics Constraints
-        if use_hamiltonian:
-            model.constrain_energy()
-        
-        losses.append(loss.item())
-        
-    total_time = time.time() - run_start
+        total_time = time.time() - run_start
+    
     tokens_per_sec = (STEPS * BATCH_SIZE * BLOCK_SIZE) / total_time
     
-    # Evaluation (Validation Loss & Perplexity)
+    # Evaluation
+    console.print("📈 Evaluating...")
     model.eval()
     val_losses = []
     with torch.no_grad():
@@ -127,10 +170,31 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     memory_mb = 0
     if DEVICE == 'cuda':
         memory_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+    
+    # Final Generation Sample
+    if tokenizer:
+        console.print("\n[bold green]📝 Final Generation Sample:[/bold green]")
+        model.eval()
+        with torch.no_grad():
+            ctx = torch.tensor([[tokenizer.encode("\n")[0]]], dtype=torch.long, device=DEVICE)
+            sample = model.generate(ctx, 100, temperature=0.8)
+            text = tokenizer.decode(sample[0].tolist())
+            console.print(Panel(text, title="Generated Text", border_style="green"))
         
     # Save Model
     model_name = config_name.replace(" ", "_").lower()
     torch.save(model.state_dict(), results_dir / "models" / f"{model_name}.pt")
+    
+    # Print Results
+    console.print(Panel(
+        f"[bold]Speed:[/bold] {tokens_per_sec:,.0f} tok/s\n"
+        f"[bold]Perplexity:[/bold] {perplexity:.2f}\n"
+        f"[bold]Val Loss:[/bold] {final_val_loss:.4f}\n"
+        f"[bold]Memory:[/bold] {memory_mb:.0f} MB\n"
+        f"[bold]Time:[/bold] {total_time:.1f}s",
+        title=f"✅ {config_name} Results",
+        border_style="green"
+    ))
     
     return {
         "Model": config_name,
@@ -186,9 +250,9 @@ def main():
     
     for name, layer, weight, init, ham, coll, act in configs:
         res = run_benchmark(name, layer, weight, train_data, val_data, 1024, results_dir, 
-                          init_mode=init, use_hamiltonian=ham, use_collapse=coll, activation_type=act)
+                          init_mode=init, use_hamiltonian=ham, use_collapse=coll, activation_type=act, tokenizer=tokenizer)
         if res:
-            loss_histories[name] = res.pop("loss_history") # Separate history for plotting
+            loss_histories[name] = res.pop("loss_history")
             results.append(res)
         
     # Display Results
