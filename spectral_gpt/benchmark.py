@@ -214,12 +214,11 @@ def main():
     console = Console()
     console.print("[bold green]Starting Spectral GPT Benchmark Suite...[/bold green]")
     
-    # Setup Results Directory
+    # Setup Results Directory (preserve tokenizer if it exists)
     results_dir = Path("benchmark_results")
-    if results_dir.exists(): shutil.rmtree(results_dir)
-    (results_dir / "models").mkdir(parents=True)
-    (results_dir / "plots").mkdir(parents=True)
-    (results_dir / "logs").mkdir(parents=True)
+    (results_dir / "models").mkdir(parents=True, exist_ok=True)
+    (results_dir / "plots").mkdir(parents=True, exist_ok=True)
+    (results_dir / "logs").mkdir(parents=True, exist_ok=True)
     
     # Data
     if not os.path.exists("input.txt"):
