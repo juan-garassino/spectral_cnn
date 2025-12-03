@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 # 1. USER WAVE
+class UserWaveLinear(nn.Module):
     def __init__(self, in_dim, out_dim, num_waves=12, num_harmonics=3, 
                  adaptive_freqs=False, per_neuron_coeffs=False, wave_mode="outer_product",
                  force_linear_coords=False, init_mode="standard"):
