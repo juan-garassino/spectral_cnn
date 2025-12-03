@@ -74,6 +74,17 @@ class UserWaveLinear(nn.Module):
                 self.freqs = nn.Parameter(init_freqs)
                 self.phases = nn.Parameter(torch.rand(num_waves) * 2 * np.pi)
         
+        elif wave_mode == "fourier_series":
+            # 1D Fourier series approach
+            if init_mode == "dft":
+                init_freqs = torch.arange(1, num_waves + 1).float()
+                self.freqs = nn.Parameter(init_freqs)
+                self.phases = nn.Parameter(torch.zeros(num_waves))
+            else:
+                init_freqs = torch.rand(num_waves) * 10.0 + 0.5
+                self.freqs = nn.Parameter(init_freqs)
+                self.phases = nn.Parameter(torch.rand(num_waves) * 2 * np.pi)
+        
         # Harmonic multipliers
         if adaptive_freqs:
             init_harm_freqs = torch.tensor([2.0**i for i in range(num_harmonics)]).float()

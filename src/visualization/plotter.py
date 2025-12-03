@@ -286,6 +286,9 @@ def plot_wave_decomposition(model, mode_name, base_dir, wave_idx=0):
     
     plt.suptitle(f"Fourier Decomposition: {mode_name} - Wave {wave_idx}\n({num_harmonics} Harmonics, Optimized Coefficients)", 
                  fontsize=14, fontweight='bold', y=0.995)
-    plt.tight_layout()
+    try:
+        plt.tight_layout()
+    except:
+        pass
     plt.savefig(f"{base_dir}/{mode_name}_fourier_decomposition_wave{wave_idx}.png", dpi=150)
     plt.close()
