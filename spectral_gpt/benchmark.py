@@ -42,7 +42,7 @@ HEADS = 4
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vocab_size, results_dir, 
-                  init_mode="standard", use_hamiltonian=False, use_collapse=False, activation_type="gelu", tokenizer=None):
+                  init_mode="standard", use_hamiltonian=False, use_collapse=False, activation_type="gelu", tokenizer=None, console=None):
     from rich.panel import Panel
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
     
@@ -262,7 +262,7 @@ def main():
     
     for name, layer, weight, init, ham, coll, act in configs:
         res = run_benchmark(name, layer, weight, train_data, val_data, 1024, results_dir, 
-                          init_mode=init, use_hamiltonian=ham, use_collapse=coll, activation_type=act, tokenizer=tokenizer)
+                          init_mode=init, use_hamiltonian=ham, use_collapse=coll, activation_type=act, tokenizer=tokenizer, console=console)
         if res:
             loss_histories[name] = res.pop("loss_history")
             results.append(res)
