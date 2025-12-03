@@ -116,8 +116,15 @@ class SpectralGatingMixing(nn.Module):
 
     def forward(self, x, progress=1.0):
         B, N, C = x.shape
+        
+        # Pad to the expected FFT size
+        pad_len = self.n_fft - N
+        if pad_len > 0:
+            x_padded = F.pad(x, (0, 0, 0, pad_len))
+        else:
+            x_padded = x[:, :self.n_fft, :]
+        
         # FFT
-        x_padded = F.pad(x, (0, 0, 0, N))
         x_fft = torch.fft.rfft(x_padded.float(), dim=1, norm='ortho')
         
         # Filter

@@ -33,12 +33,12 @@ from model import SpectralGPT
 from train import BasicTokenizer, get_batch, GPTConfig
 
 # Configuration
-STEPS = 200
-BATCH_SIZE = 16
+STEPS = 2000
+BATCH_SIZE = 20   # Safe for all 5 models
 BLOCK_SIZE = 128
-D_MODEL = 128
-LAYERS = 4
-HEADS = 4
+D_MODEL = 192     # 1.5x larger than original, fits all models
+LAYERS = 6        # 50% deeper
+HEADS = 6         # 50% more heads
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vocab_size, results_dir, 
