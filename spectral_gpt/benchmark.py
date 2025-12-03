@@ -227,9 +227,22 @@ def main():
         urllib.request.urlretrieve("https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt", "input.txt")
     
     with open("input.txt", 'r') as f: text = f.read()
-    tokenizer = BasicTokenizer()
-    tokenizer.train(text, 1024)
-    tokenizer.save(results_dir / "tokenizer.json")
+    
+    # Check if tokenizer already exists
+    tokenizer_path = results_dir / "tokenizer.json"
+    if tokenizer_path.exists():
+        console.print("[cyan]♻️  Loading existing tokenizer...[/cyan]")
+        tokenizer = BasicTokenizer()
+        with open(tokenizer_path, 'r') as f:
+            data = json.load(f)
+            tokenizer.merges = {eval(k): v for k, v in data['merges'].items()}
+            tokenizer.vocab = {int(k): bytes(v) for k, v in data['vocab'].items()}
+    else:
+        console.print("[yellow]🔧 Training new tokenizer...[/yellow]")
+        tokenizer = BasicTokenizer()
+        tokenizer.train(text, 1024)
+        tokenizer.save(tokenizer_path)
+        console.print(f"[green]✅ Tokenizer saved to {tokenizer_path}[/green]")
     
     data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     n = int(0.9 * len(data))
