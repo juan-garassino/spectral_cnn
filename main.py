@@ -101,7 +101,13 @@ EXPERIMENTS = {
 # Select which experiments to run
 ACTIVE_EXPERIMENTS = [
     "spectral_baseline",
-    "spectral_1d"
+    "spectral_1d",
+    "gabor_wavelets",
+    "high_freq_rich",
+    "compressed_2d",
+    "high_capacity_1d",
+    "per_neuron_coeffs",
+    "spectral_cnn"
 ]
 
 def run_experiment(exp_name, exp_config, device):
