@@ -39,6 +39,7 @@ class GPTConfig:
     block_size: int
     dropout: float
     layer_type: str
+    weight_type: str
     num_waves: int
     num_harmonics: int
     init_mode: str = "standard"
