@@ -142,17 +142,33 @@ class UserWaveLinear(nn.Module):
         self.bias = nn.Parameter(torch.zeros(out_dim))
 
     def constrain_energy(self):
-        """Hamiltonian Descent: Normalize amplitudes to conserve energy."""
+        """Hamiltonian Descent: Normalize wave amplitudes."""
         with torch.no_grad():
-            # Normalize amplitudes to have unit norm
-            if self.wave_mode in ["fourier_series", "gabor"]:
-                # Per-neuron amplitudes [out_dim, num_waves]
-                norm = torch.norm(self.amplitudes, p=2, dim=1, keepdim=True)
-                self.amplitudes.data.div_(norm + 1e-8)
-            else:
-                # Shared amplitudes [num_waves]
-                norm = torch.norm(self.amplitudes, p=2)
-                self.amplitudes.data.div_(norm + 1e-8)
+            if hasattr(self, 'amplitudes'):
+                # Normalize amplitudes across waves to conserve energy
+                norm = torch.norm(self.amplitudes, p=2, dim=-1, keepdim=True)
+                self.amplitudes.div_(norm + 1e-8)
+    
+    def stabilize_waves(self):
+        """
+        Stabilize wave parameters while preserving interference patterns.
+        Called during training to prevent explosion while maintaining shape.
+        """
+        with torch.no_grad():
+            # Normalize amplitudes while preserving relative ratios
+            if hasattr(self, 'amplitudes'):
+                norm = torch.norm(self.amplitudes)
+                if norm > 10:  # Only normalize if too large
+                    self.amplitudes.mul_(10 / norm)  # Scale down, preserving ratios
+            
+            # Keep frequencies reasonable
+            if hasattr(self, 'freqs'):
+                self.freqs.clamp_(-20, 20)
+            
+            # Wrap phases to [-π, π]
+            if hasattr(self, 'phases'):
+                self.phases.remainder_(2 * math.pi)
+                self.phases.sub_(math.pi)  # Center at 0
 
     def forward(self, x):
         if self.wave_mode == "outer_product":

@@ -385,6 +385,29 @@ class SpectralGPT(nn.Module):
         for block in self.blocks:
             block.constrain_energy()
 
+    def stabilize_waves(self):
+        """Stabilize all wave parameters to prevent explosion while preserving interference."""
+        if self.config.weight_type == 'wave':
+            if hasattr(self.token_emb, 'wave_generator'):
+                self.token_emb.wave_generator.stabilize_waves()
+            if hasattr(self.pos_emb, 'wave_encoder'):
+                self.pos_emb.wave_encoder.stabilize_waves()
+            if hasattr(self.head, 'stabilize_waves'):
+                self.head.stabilize_waves()
+        
+        for block in self.blocks:
+            # Stabilize mixer if it's wave-based
+            if hasattr(block.mixer, 'q_proj'):  # SpectralAttention
+                block.mixer.q_proj.stabilize_waves()
+                block.mixer.k_proj.stabilize_waves()
+                block.mixer.v_proj.stabilize_waves()
+                block.mixer.o_proj.stabilize_waves()
+            
+            # Stabilize MLP layers
+            for m in block.mlp:
+                if hasattr(m, 'stabilize_waves'):
+                    m.stabilize_waves()
+
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=0.8, top_k=None):
         self.eval()

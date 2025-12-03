@@ -132,27 +132,11 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
             
             optimizer.step()
             
-            # Wave Stabilization: Preserve Interference Patterns
+            # Wave Stabilization: Built into model
             if weight_type == "wave":
-                with torch.no_grad():
-                    for name, param in model.named_parameters():
-                        # Normalize amplitudes while preserving relative ratios (interference patterns)
-                        if 'amplitudes' in name:
-                            # L2 norm to preserve shape but bound magnitude
-                            norm = torch.norm(param)
-                            if norm > 10:  # Only normalize if too large
-                                param.mul_(10 / norm)  # Scale down, preserving ratios
-                        
-                        # Keep frequencies reasonable (but allow learning)
-                        elif 'freqs' in name:
-                            param.clamp_(-20, 20)
-                        
-                        # Wrap phases to [-π, π] to stay in valid range
-                        elif 'phases' in name:
-                            param.remainder_(2 * math.pi)
-                            param.sub_(math.pi)  # Center at 0
+                model.stabilize_waves()
             
-            # Physics Constraints: Energy conservation (preserves superposition)
+            # Physics Constraints: Energy conservation
             if use_hamiltonian or (weight_type == "wave" and step % 10 == 0):
                 try:
                     model.constrain_energy()
