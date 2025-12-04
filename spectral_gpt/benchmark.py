@@ -72,10 +72,10 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     n_heads = HEADS
     dropout = 0.1
     
-    # Wave capacity: balance between params and memory
-    # 32 waves × 8 harmonics = ~1M params (memory-friendly)
-    num_waves = 32 if weight_type == "wave" else 12
-    num_harmonics = 8 if weight_type == "wave" else 5
+    # Wave capacity: Use CNN's proven optimal settings
+    # 12 waves × 5 harmonics = stable and effective (matches CNN benchmark)
+    num_waves = 12
+    num_harmonics = 5
     
     # Config
     config = GPTConfig(
@@ -91,6 +91,15 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     # Model
     try:
         model = SpectralGPT(config).to(DEVICE)
+        
+        # Normalize wave weights for stability
+        if weight_type == "wave":
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    if 'fourier_coeffs' in name or 'amplitudes' in name:
+                        param.data *= 0.1  # Scale down for stability
+                    if 'freqs' in name and 'harmonic' not in name:
+                        param.data.clamp_(0.1, 5.0)  # Limit frequency range
     except Exception as e:
         console.print(f"[red]Failed to init model: {e}[/red]")
         return None
@@ -98,9 +107,11 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
     
-    # Same learning rate for all models (fair comparison)
-    # Wave models may need more steps, not lower LR
-    lr = 1e-3
+    # Wave models need lower LR to prevent NaN collapse
+    if weight_type == "wave":
+        lr = 1e-4  # Much lower for wave stability
+    else:
+        lr = 1e-3  # Standard for classic transformer
     
     console.print(f"⚙️  Learning Rate: [bold]{lr:.0e}[/bold] | Dropout: [bold]{dropout}[/bold]")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
@@ -109,11 +120,16 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     model.train()
     losses = []
     
-    # Warmup
+    # Warmup (with try/except to catch early NaN)
     console.print("🔥 Warming up...")
-    for _ in range(5):
-        x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
-        _, _ = model(x, y)
+    try:
+        for _ in range(5):
+            x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
+            with torch.no_grad():
+                _, _ = model(x, y)
+    except Exception as e:
+        console.print(f"[red]Warmup failed: {e}[/red]")
+        return None
     
     from train import get_collapse_penalty
     
