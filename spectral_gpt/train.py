@@ -46,6 +46,7 @@ class GPTConfig:
     activation_type: str = "gelu"
     hybrid_mode: bool = False
     complex_attention: bool = False
+    wave_mode: str = "outer_product"  # "outer_product", "gabor", "fourier_series"
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Unified Spectral GPT')

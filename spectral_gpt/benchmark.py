@@ -51,13 +51,13 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vocab_size, results_dir, 
                   init_mode="standard", use_hamiltonian=False, use_collapse=False, activation_type="gelu", 
-                  hybrid_mode=False, complex_attention=False, tokenizer=None, console=None):
+                  hybrid_mode=False, complex_attention=False, wave_mode="outer_product", tokenizer=None, console=None):
     from rich.panel import Panel
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
     
     console.print(Panel(f"[bold cyan]{config_name}[/bold cyan]\n"
                        f"Layer: {layer_type} | Weights: {weight_type} | Activation: {activation_type}\n"
-                       f"Init: {init_mode} | Hamiltonian: {use_hamiltonian} | Collapse: {use_collapse}",
+                       f"Init: {init_mode} | WaveMode: {wave_mode} | Hamiltonian: {use_hamiltonian}",
                        title="🧪 Model Config", border_style="cyan"))
     
     # Reset
@@ -84,7 +84,8 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
         dropout=dropout, layer_type=layer_type, weight_type=weight_type,
         num_waves=num_waves, num_harmonics=num_harmonics,
         init_mode=init_mode, activation_type=activation_type,
-        hybrid_mode=hybrid_mode, complex_attention=complex_attention
+        hybrid_mode=hybrid_mode, complex_attention=complex_attention,
+        wave_mode=wave_mode
     )
     
     # Model
@@ -313,22 +314,21 @@ def main():
     train_data, val_data = data[:n], data[n:]
     
     # Configurations to Test
-    # Format: (Name, Layer, Weight, InitMode, UseHamiltonian, UseCollapse, Activation, Hybrid, Complex)
+    # Format: (Name, Layer, Weight, InitMode, UseHamiltonian, UseCollapse, Activation, Hybrid, Complex, WaveMode)
     # Note: All models must use 'attention' to be causal (no peeking at future tokens)
     configs = [
-        ("Classic Transformer", "attention", "standard", "standard", False, False, "gelu", False, False),
-        ("Spectral Transformer", "attention", "wave", "standard", False, False, "gelu", False, False),
-        ("Physics Spectral ⚛️", "attention", "wave", "holographic", True, True, "modulate", False, False),
-        ("Hybrid Spectral 🌓", "attention", "wave", "standard", False, False, "gelu", True, False),
-        ("Complex Spectral 🌊", "attention", "wave", "holographic", True, True, "modulate", False, True),
+        ("Classic Transformer", "attention", "standard", "standard", False, False, "gelu", False, False, "outer_product"),
+        ("Spectral Transformer", "attention", "wave", "standard", False, False, "gelu", False, False, "outer_product"),
+        ("Gabor Spectral 🌊", "attention", "wave", "standing_wave", False, False, "gelu", False, False, "gabor"),  # CNN winner!
+        ("Physics Spectral ⚛️", "attention", "wave", "holographic", True, True, "modulate", False, False, "outer_product"),
     ]
     
     results = []
     loss_histories = {}
-    for name, layer, weight, init, ham, coll, act, hybrid, complex_att in configs:
+    for name, layer, weight, init, ham, coll, act, hybrid, complex_att, wave_mode in configs:
         res = run_benchmark(name, layer, weight, train_data, val_data, 1024, results_dir, 
                           init_mode=init, use_hamiltonian=ham, use_collapse=coll, activation_type=act,
-                          hybrid_mode=hybrid, complex_attention=complex_att,
+                          hybrid_mode=hybrid, complex_attention=complex_att, wave_mode=wave_mode,
                           tokenizer=tokenizer, console=console)
         if res:
             loss_histories[name] = res.pop("loss_history")

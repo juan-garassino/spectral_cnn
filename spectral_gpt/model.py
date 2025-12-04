@@ -233,16 +233,16 @@ class SpectralAttention(nn.Module):
     Wave-based Multi-Head Attention.
     Standard Attention mechanism, but Q/K/V/Out are Wave Layers.
     """
-    def __init__(self, dim, num_heads, num_waves=12, num_harmonics=5, dropout=0.1, init_mode="standard"):
+    def __init__(self, dim, num_heads, num_waves=12, num_harmonics=5, dropout=0.1, init_mode="standard", wave_mode="outer_product"):
         super().__init__()
         self.num_heads = num_heads
         self.scale = (dim // num_heads) ** -0.5
         
-        # Wave-based projections
-        self.q_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
-        self.k_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
-        self.v_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
-        self.o_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
+        # Wave-based projections with Gabor support
+        self.q_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode, wave_mode=wave_mode)
+        self.k_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode, wave_mode=wave_mode)
+        self.v_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode, wave_mode=wave_mode)
+        self.o_proj = UserWaveLinear(dim, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode, wave_mode=wave_mode)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, progress=1.0):
@@ -300,6 +300,7 @@ class SpectralBlock(nn.Module):
         elif config.layer_type == 'attention':
             if config.weight_type == 'wave' and is_spectral_layer:
                 # Use Complex Attention if enabled
+                wave_mode = getattr(config, 'wave_mode', 'outer_product')
                 if getattr(config, 'complex_attention', False):
                     self.mixer = ComplexSpectralAttention(config.d_model, config.num_heads, 
                                                  config.num_waves, config.num_harmonics, config.dropout,
@@ -307,7 +308,8 @@ class SpectralBlock(nn.Module):
                 else:
                     self.mixer = SpectralAttention(config.d_model, config.num_heads, 
                                                  config.num_waves, config.num_harmonics, config.dropout,
-                                                 init_mode=getattr(config, 'init_mode', 'standard'))
+                                                 init_mode=getattr(config, 'init_mode', 'standard'),
+                                                 wave_mode=wave_mode)
             else:
                 self.mixer = nn.MultiheadAttention(config.d_model, config.num_heads, 
                                                  dropout=config.dropout, batch_first=True)
@@ -326,13 +328,14 @@ class SpectralBlock(nn.Module):
 
         # Wave MLP only for spectral layers
         if config.weight_type == 'wave' and is_spectral_layer:
+            wave_mode = getattr(config, 'wave_mode', 'outer_product')
             self.mlp = nn.Sequential(
                 UserWaveLinear(config.d_model, config.d_ff, config.num_waves, config.num_harmonics, 
-                             adaptive_freqs=True, init_mode=getattr(config, 'init_mode', 'standard')),
+                             adaptive_freqs=True, init_mode=getattr(config, 'init_mode', 'standard'), wave_mode=wave_mode),
                 activation,
                 nn.Dropout(config.dropout),
                 UserWaveLinear(config.d_ff, config.d_model, config.num_waves, config.num_harmonics, 
-                             adaptive_freqs=True, init_mode=getattr(config, 'init_mode', 'standard')),
+                             adaptive_freqs=True, init_mode=getattr(config, 'init_mode', 'standard'), wave_mode=wave_mode),
                 nn.Dropout(config.dropout)
             )
         else:
