@@ -100,7 +100,7 @@ EXPERIMENTS = {
 
 # Select which experiments to run
 ACTIVE_EXPERIMENTS = [
-    "spectral_baseline",
+    #"spectral_baseline",
     "spectral_1d",
     "gabor_wavelets",
     "high_freq_rich",

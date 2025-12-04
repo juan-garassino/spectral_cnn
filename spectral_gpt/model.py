@@ -155,6 +155,79 @@ class SpectralGatingMixing(nn.Module):
             self.complex_weight.data.div_(channel_energy + 1e-8)
 
 
+class ComplexSpectralAttention(nn.Module):
+    """
+    Complex-Valued Attention Mechanism 🌊
+    
+    Implements true wave interference using complex numbers:
+    Q, K, V are complex-valued vectors.
+    Attention Score = Re(Q * K^H)  (Real part of inner product)
+    Output = Score * V
+    """
+    def __init__(self, dim, num_heads, num_waves=12, num_harmonics=5, dropout=0.1, init_mode="standard"):
+        super().__init__()
+        assert dim % num_heads == 0
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        
+        # Complex Projections (Output dimension is 2*dim for Real+Imag parts)
+        # We use UserWaveLinear to generate the complex weights
+        self.q_proj = UserWaveLinear(dim, dim * 2, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
+        self.k_proj = UserWaveLinear(dim, dim * 2, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
+        self.v_proj = UserWaveLinear(dim, dim * 2, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
+        self.o_proj = UserWaveLinear(dim * 2, dim, num_waves, num_harmonics, adaptive_freqs=True, init_mode=init_mode)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x, progress=1.0):
+        B, N, C = x.shape
+        
+        # Project to Complex (Real, Imag)
+        # Shape: [B, N, 2*C] -> [B, N, H, 2*D] -> [B, H, N, 2*D]
+        q = self.q_proj(x).view(B, N, self.num_heads, 2 * self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, N, self.num_heads, 2 * self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, N, self.num_heads, 2 * self.head_dim).transpose(1, 2)
+        
+        # Split into Real and Imag parts
+        q_r, q_i = q.chunk(2, dim=-1)
+        k_r, k_i = k.chunk(2, dim=-1)
+        v_r, v_i = v.chunk(2, dim=-1)
+        
+        # Complex Inner Product: (a+bi)(c-di) = (ac+bd) + i(bc-ad)
+        # We only care about the magnitude/interference for the score, or maybe just the real part?
+        # Standard complex attention usually uses Re(Q K^H) for logits
+        
+        # Real part of Q * K^H = Q_r * K_r + Q_i * K_i
+        attn_scores = (q_r @ k_r.transpose(-2, -1)) + (q_i @ k_i.transpose(-2, -1))
+        attn_scores = attn_scores / math.sqrt(self.head_dim)
+        
+        # Causal Masking (Internal)
+        mask = torch.tril(torch.ones(N, N, device=x.device)).view(1, 1, N, N)
+        attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
+            
+        attn_probs = F.softmax(attn_scores, dim=-1)
+        attn_probs = self.dropout(attn_probs)
+        
+        # Output = Prob * V (Complex multiplication)
+        # Out_r = Prob * V_r
+        # Out_i = Prob * V_i
+        # Note: This is a simplification. True complex attention might rotate V too.
+        # But for "interference", weighting the complex vector V by the real probability is standard.
+        
+        out_r = attn_probs @ v_r
+        out_i = attn_probs @ v_i
+        
+        # Concatenate back to [B, H, N, 2*D]
+        out = torch.cat([out_r, out_i], dim=-1)
+        
+        # Reshape to [B, N, 2*C]
+        out = out.transpose(1, 2).contiguous().view(B, N, 2 * self.dim)
+        
+        # Final projection back to real [B, N, C]
+        return self.o_proj(out)
+
+
 class SpectralAttention(nn.Module):
     """
     Wave-based Multi-Head Attention.
@@ -322,7 +395,7 @@ class SpectralGPT(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         
         # Blocks
-        self.blocks = nn.ModuleList([SpectralBlock(config) for _ in range(config.num_layers)])
+        self.blocks = nn.ModuleList([SpectralBlock(config, layer_index=i) for i in range(config.num_layers)])
         
         # Head
         self.norm_f = nn.LayerNorm(config.d_model)

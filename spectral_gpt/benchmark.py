@@ -29,6 +29,14 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+import sys
+import os
+# Add project root to sys.path to find 'src'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from model import SpectralGPT
 from train import BasicTokenizer, get_batch, GPTConfig
 
@@ -42,7 +50,8 @@ HEADS = 6         # 50% more heads
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vocab_size, results_dir, 
-                  init_mode="standard", use_hamiltonian=False, use_collapse=False, activation_type="gelu", tokenizer=None, console=None):
+                  init_mode="standard", use_hamiltonian=False, use_collapse=False, activation_type="gelu", 
+                  hybrid_mode=False, complex_attention=False, tokenizer=None, console=None):
     from rich.panel import Panel
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
     
@@ -57,13 +66,26 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
         torch.cuda.reset_peak_memory_stats()
     gc.collect()
     
+    # Use smaller model for wave-based configs to ensure stability
+    if weight_type == "wave":
+        d_model = 128  # Smaller for wave stability
+        n_layers = 4
+        n_heads = 4
+        dropout = 0.1
+    else:
+        d_model = D_MODEL  # Full size for standard weights
+        n_layers = LAYERS
+        n_heads = HEADS
+        dropout = 0.1  # Add dropout to prevent overfitting
+    
     # Config
     config = GPTConfig(
-        vocab_size=vocab_size, d_model=D_MODEL, num_layers=LAYERS,
-        num_heads=HEADS, d_ff=D_MODEL*4, block_size=BLOCK_SIZE,
-        dropout=0.0, layer_type=layer_type, weight_type=weight_type,
+        vocab_size=vocab_size, d_model=d_model, num_layers=n_layers,
+        num_heads=n_heads, d_ff=d_model*4, block_size=BLOCK_SIZE,
+        dropout=dropout, layer_type=layer_type, weight_type=weight_type,
         num_waves=12, num_harmonics=5,
-        init_mode=init_mode, activation_type=activation_type
+        init_mode=init_mode, activation_type=activation_type,
+        hybrid_mode=hybrid_mode, complex_attention=complex_attention
     )
     
     # Model
@@ -76,8 +98,15 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
     
-    # Use lower learning rate for wave-based models (they're more sensitive)
-    lr = 3e-4 if weight_type == "wave" else 1e-3
+    # Use lower learning rate for FFT and wave models (more sensitive)
+    if layer_type == "fft":
+        lr = 3e-4  # Lower for FFT (prevents overfitting)
+    elif weight_type == "wave":
+        lr = 3e-4  # Lower for waves (prevents instability)
+    else:
+        lr = 1e-3  # Standard LR
+    
+    console.print(f"⚙️  Learning Rate: [bold]{lr:.0e}[/bold] | Dropout: [bold]{dropout}[/bold]")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     
     # Training Loop
@@ -289,21 +318,23 @@ def main():
     train_data, val_data = data[:n], data[n:]
     
     # Configurations to Test
-    # Format: (Name, Layer, Weight, InitMode, UseHamiltonian, UseCollapse, Activation)
-    # Note: Spectral Transformer (attention + wave) removed due to instability at large scale
+    # Format: (Name, Layer, Weight, InitMode, UseHamiltonian, UseCollapse, Activation, Hybrid, Complex)
+    # Note: All models must use 'attention' to be causal (no peeking at future tokens)
     configs = [
-        ("Classic Transformer", "attention", "standard", "standard", False, False, "gelu"),
-        ("FFT Mixer (GFNet)", "fft", "standard", "standard", False, False, "gelu"),
-        ("Full Spectral", "fft", "wave", "standard", False, False, "gelu"),
-        ("Physics Spectral ⚛️", "fft", "wave", "holographic", True, True, "modulate"),
+        ("Classic Transformer", "attention", "standard", "standard", False, False, "gelu", False, False),
+        ("Spectral Transformer", "attention", "wave", "standard", False, False, "gelu", False, False),
+        ("Physics Spectral ⚛️", "attention", "wave", "holographic", True, True, "modulate", False, False),
+        ("Hybrid Spectral 🌓", "attention", "wave", "standard", False, False, "gelu", True, False),
+        ("Complex Spectral 🌊", "attention", "wave", "holographic", True, True, "modulate", False, True),
     ]
     
     results = []
     loss_histories = {}
-    
-    for name, layer, weight, init, ham, coll, act in configs:
+    for name, layer, weight, init, ham, coll, act, hybrid, complex_att in configs:
         res = run_benchmark(name, layer, weight, train_data, val_data, 1024, results_dir, 
-                          init_mode=init, use_hamiltonian=ham, use_collapse=coll, activation_type=act, tokenizer=tokenizer, console=console)
+                          init_mode=init, use_hamiltonian=ham, use_collapse=coll, activation_type=act,
+                          hybrid_mode=hybrid, complex_attention=complex_att,
+                          tokenizer=tokenizer, console=console)
         if res:
             loss_histories[name] = res.pop("loss_history")
             results.append(res)

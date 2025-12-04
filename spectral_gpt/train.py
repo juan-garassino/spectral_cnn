@@ -44,6 +44,8 @@ class GPTConfig:
     num_harmonics: int
     init_mode: str = "standard"
     activation_type: str = "gelu"
+    hybrid_mode: bool = False
+    complex_attention: bool = False
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Unified Spectral GPT')
