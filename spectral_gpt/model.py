@@ -345,18 +345,21 @@ class SpectralBlock(nn.Module):
             )
 
     def forward(self, x, progress=1.0):
-        # Mixer
-        if self.config.layer_type == 'fft':
-            x = x + self.mixer(self.norm1(x), progress)
-        elif self.config.layer_type == 'attention':
-            if self.config.weight_type == 'wave':
-                x = x + self.mixer(self.norm1(x), progress)
-            else:
-                # Standard Attention needs mask
-                attn_out, _ = self.mixer(self.norm1(x), self.norm1(x), self.norm1(x), 
-                                       attn_mask=nn.Transformer.generate_square_subsequent_mask(x.size(1), device=x.device),
-                                       is_causal=True)
-                x = x + attn_out
+        # Mixer - check actual type, not config (important for hybrid mode)
+        norm_x = self.norm1(x)
+        
+        if isinstance(self.mixer, nn.MultiheadAttention):
+            # Standard Attention needs (q, k, v) and mask
+            attn_out, _ = self.mixer(norm_x, norm_x, norm_x, 
+                                   attn_mask=nn.Transformer.generate_square_subsequent_mask(x.size(1), device=x.device),
+                                   is_causal=True)
+            x = x + attn_out
+        elif isinstance(self.mixer, SpectralGatingMixing):
+            # FFT Mixer
+            x = x + self.mixer(norm_x, progress)
+        else:
+            # Wave-based attention (SpectralAttention or ComplexSpectralAttention)
+            x = x + self.mixer(norm_x, progress)
         
         # MLP
         x = x + self.mlp(self.norm2(x))

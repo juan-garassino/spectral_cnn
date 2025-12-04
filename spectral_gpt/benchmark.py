@@ -41,12 +41,12 @@ from model import SpectralGPT
 from train import BasicTokenizer, get_batch, GPTConfig
 
 # Configuration
-STEPS = 200
-BATCH_SIZE = 20   # Safe for all 5 models
+STEPS = 1000       # Increased for wave convergence
+BATCH_SIZE = 16    # Slightly smaller for larger models
 BLOCK_SIZE = 128
-D_MODEL = 192     # 1.5x larger than original, fits all models
-LAYERS = 6        # 50% deeper
-HEADS = 6         # 50% more heads
+D_MODEL = 192      # Same for ALL models (fair comparison)
+LAYERS = 6         # Same for ALL models
+HEADS = 6          # Same for ALL models
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vocab_size, results_dir, 
@@ -66,17 +66,11 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
         torch.cuda.reset_peak_memory_stats()
     gc.collect()
     
-    # Use smaller model for wave-based configs to ensure stability
-    if weight_type == "wave":
-        d_model = 128  # Smaller for wave stability
-        n_layers = 4
-        n_heads = 4
-        dropout = 0.1
-    else:
-        d_model = D_MODEL  # Full size for standard weights
-        n_layers = LAYERS
-        n_heads = HEADS
-        dropout = 0.1  # Add dropout to prevent overfitting
+    # ALL models use same size for fair comparison
+    d_model = D_MODEL
+    n_layers = LAYERS
+    n_heads = HEADS
+    dropout = 0.1
     
     # Config
     config = GPTConfig(
@@ -98,13 +92,9 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
     
-    # Use lower learning rate for FFT and wave models (more sensitive)
-    if layer_type == "fft":
-        lr = 3e-4  # Lower for FFT (prevents overfitting)
-    elif weight_type == "wave":
-        lr = 3e-4  # Lower for waves (prevents instability)
-    else:
-        lr = 1e-3  # Standard LR
+    # Same learning rate for all models (fair comparison)
+    # Wave models may need more steps, not lower LR
+    lr = 1e-3
     
     console.print(f"⚙️  Learning Rate: [bold]{lr:.0e}[/bold] | Dropout: [bold]{dropout}[/bold]")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
