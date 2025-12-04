@@ -279,20 +279,35 @@ class SpectralAttention(nn.Module):
 # ==========================================
 
 class SpectralBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_index=0):
         super().__init__()
         self.config = config
         self.norm1 = nn.LayerNorm(config.d_model)
         self.norm2 = nn.LayerNorm(config.d_model)
         
+        # Hybrid Mode: Alternate between Spectral (even) and Standard (odd)
+        is_spectral_layer = True
+        if getattr(config, 'hybrid_mode', False):
+            is_spectral_layer = (layer_index % 2 == 0)
+        
         # Mixing Layer Selection
         if config.layer_type == 'fft':
-            self.mixer = SpectralGatingMixing(config.d_model, config.block_size, init_mode=getattr(config, 'init_mode', 'standard'))
+            if is_spectral_layer:
+                self.mixer = SpectralGatingMixing(config.d_model, config.block_size, init_mode=getattr(config, 'init_mode', 'standard'))
+            else:
+                self.mixer = nn.MultiheadAttention(config.d_model, config.num_heads, 
+                                                 dropout=config.dropout, batch_first=True)
         elif config.layer_type == 'attention':
-            if config.weight_type == 'wave':
-                self.mixer = SpectralAttention(config.d_model, config.num_heads, 
-                                             config.num_waves, config.num_harmonics, config.dropout,
-                                             init_mode=getattr(config, 'init_mode', 'standard'))
+            if config.weight_type == 'wave' and is_spectral_layer:
+                # Use Complex Attention if enabled
+                if getattr(config, 'complex_attention', False):
+                    self.mixer = ComplexSpectralAttention(config.d_model, config.num_heads, 
+                                                 config.num_waves, config.num_harmonics, config.dropout,
+                                                 init_mode=getattr(config, 'init_mode', 'standard'))
+                else:
+                    self.mixer = SpectralAttention(config.d_model, config.num_heads, 
+                                                 config.num_waves, config.num_harmonics, config.dropout,
+                                                 init_mode=getattr(config, 'init_mode', 'standard'))
             else:
                 self.mixer = nn.MultiheadAttention(config.d_model, config.num_heads, 
                                                  dropout=config.dropout, batch_first=True)
@@ -301,22 +316,16 @@ class SpectralBlock(nn.Module):
         act_type = getattr(config, 'activation_type', 'gelu')
         
         if act_type == 'bilinear':
-            # SwiGLU / Bilinear style (requires different dim structure usually, but we'll adapt)
-            # Standard SwiGLU: (Swish(xW) * xV)W2
-            # Here we'll just use a GLU-like structure within the sequential block if possible, 
-            # or just replace the activation function.
-            # Let's implement a custom module for the activation to keep it clean.
-            activation = nn.SiLU() # Swish
+            activation = nn.SiLU()
         elif act_type == 'modulate':
-            # Physics-based: x * cos(x)
-            # Creates sidebands (sum/diff frequencies)
             class CosineModulation(nn.Module):
                 def forward(self, x): return x * torch.cos(x)
             activation = CosineModulation()
         else:
             activation = nn.GELU()
 
-        if config.weight_type == 'wave':
+        # Wave MLP only for spectral layers
+        if config.weight_type == 'wave' and is_spectral_layer:
             self.mlp = nn.Sequential(
                 UserWaveLinear(config.d_model, config.d_ff, config.num_waves, config.num_harmonics, 
                              adaptive_freqs=True, init_mode=getattr(config, 'init_mode', 'standard')),
