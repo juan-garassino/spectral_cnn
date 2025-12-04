@@ -42,11 +42,11 @@ from train import BasicTokenizer, get_batch, GPTConfig
 
 # Configuration
 STEPS = 1000       # Increased for wave convergence
-BATCH_SIZE = 16    # Slightly smaller for larger models
+BATCH_SIZE = 8     # Smaller batch for wave models memory
 BLOCK_SIZE = 128
-D_MODEL = 192      # Same for ALL models (fair comparison)
-LAYERS = 6         # Same for ALL models
-HEADS = 6          # Same for ALL models
+D_MODEL = 128      # ~1M params for ALL models (fair comparison)
+LAYERS = 4         # Fewer layers for ~1M params
+HEADS = 4          # Fewer heads for ~1M params
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vocab_size, results_dir, 
@@ -72,10 +72,10 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     n_heads = HEADS
     dropout = 0.1
     
-    # Wave capacity: more waves = more parameters
-    # Target: ~3M params to match Classic Transformer
-    num_waves = 64 if weight_type == "wave" else 12
-    num_harmonics = 16 if weight_type == "wave" else 5
+    # Wave capacity: balance between params and memory
+    # 32 waves × 8 harmonics = ~1M params (memory-friendly)
+    num_waves = 32 if weight_type == "wave" else 12
+    num_harmonics = 8 if weight_type == "wave" else 5
     
     # Config
     config = GPTConfig(
