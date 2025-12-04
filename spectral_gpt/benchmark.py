@@ -72,12 +72,17 @@ def run_benchmark(config_name, layer_type, weight_type, train_data, val_data, vo
     n_heads = HEADS
     dropout = 0.1
     
+    # Wave capacity: more waves = more parameters
+    # Target: ~3M params to match Classic Transformer
+    num_waves = 64 if weight_type == "wave" else 12
+    num_harmonics = 16 if weight_type == "wave" else 5
+    
     # Config
     config = GPTConfig(
         vocab_size=vocab_size, d_model=d_model, num_layers=n_layers,
         num_heads=n_heads, d_ff=d_model*4, block_size=BLOCK_SIZE,
         dropout=dropout, layer_type=layer_type, weight_type=weight_type,
-        num_waves=12, num_harmonics=5,
+        num_waves=num_waves, num_harmonics=num_harmonics,
         init_mode=init_mode, activation_type=activation_type,
         hybrid_mode=hybrid_mode, complex_attention=complex_attention
     )
