@@ -25,11 +25,28 @@ from rich.table import Table
 from wave_gpt import WaveGPT, WaveGPTConfig
 from train import BasicTokenizer, get_batch
 
-# Config
-STEPS = 500
-BATCH_SIZE = 16
-BLOCK_SIZE = 128
+# Config - SCALED UP for 16GB GPU
+STEPS = 2000          # More training
+BATCH_SIZE = 32       # Larger batch
+BLOCK_SIZE = 256      # Longer context
+D_MODEL = 256         # Wider model
+NUM_LAYERS = 6        # Deeper model
+NUM_HEADS = 8         # More heads
+NUM_WAVES = 32        # More wave components
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
+def get_gpu_memory():
+    """Get current GPU memory usage in MB"""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024**2
+    return 0
+
+def get_gpu_memory_peak():
+    """Get peak GPU memory usage in MB"""
+    if torch.cuda.is_available():
+        return torch.cuda.max_memory_allocated() / 1024**2
+    return 0
 
 
 def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
@@ -93,13 +110,15 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
             losses.append(loss.item())
             progress.update(task, advance=1, loss=loss.item())
             
-            # Log every 50 steps
-            if (step + 1) % 50 == 0:
-                avg = sum(losses[-50:]) / len(losses[-50:])
-                console.print(f"Step {step+1:4d} | Loss: {loss.item():.4f} | Avg: {avg:.4f}")
+    # Log every 100 steps with memory
+            if (step + 1) % 100 == 0:
+                avg = sum(losses[-100:]) / len(losses[-100:])
+                mem = get_gpu_memory()
+                console.print(f"Step {step+1:4d} | Loss: {loss.item():.4f} | Avg: {avg:.4f} | GPU: {mem:.0f}MB")
     
     elapsed = time.perf_counter() - start_time
     speed = total_tokens / elapsed
+    peak_mem = get_gpu_memory_peak()
     
     # Final eval
     model.eval()
@@ -114,23 +133,31 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
     text = tokenizer.decode(generated[0].tolist())
     console.print(Panel(text[:200], title="Generated Text", border_style="green"))
     
+    console.print(f"🎯 Peak GPU Memory: [bold]{peak_mem:.0f}MB[/bold] / 16000MB")
+    
     return {
         "model": config_name,
         "params": params,
         "speed": speed,
         "val_loss": val_loss.item(),
         "perplexity": torch.exp(val_loss).item(),
-        "time": elapsed
+        "time": elapsed,
+        "peak_memory": peak_mem
     }
 
 
 def main():
     console = Console()
     console.print(Panel.fit(
-        "[bold magenta]🌊 WAVE-NATIVE GPT BENCHMARK[/bold magenta]\n\n"
-        "Tokens as Wave Packets • Interference Attention • Wave Collapse",
+        "[bold magenta]🌊 WAVE-NATIVE GPT BENCHMARK (SCALED UP)[/bold magenta]\n\n"
+        f"d_model={D_MODEL} | layers={NUM_LAYERS} | heads={NUM_HEADS} | waves={NUM_WAVES}\n"
+        f"batch={BATCH_SIZE} | context={BLOCK_SIZE} | steps={STEPS}",
         border_style="magenta"
     ))
+    
+    # Reset GPU memory tracking
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     
     # Load data
     console.print("\n📚 Loading Shakespeare...")
@@ -145,10 +172,14 @@ def main():
     
     text = open(data_path, 'r').read()
     
-    # Tokenizer
-    tokenizer_path = os.path.join(current_dir, "tokenizer.json")
+    # Tokenizer - check results folder first (where main benchmark saves it)
+    results_tokenizer = os.path.join(current_dir, "results", "tokenizer.json")
+    local_tokenizer = os.path.join(current_dir, "tokenizer.json")
+    
+    tokenizer_path = results_tokenizer if os.path.exists(results_tokenizer) else local_tokenizer
+    
     if os.path.exists(tokenizer_path):
-        console.print("♻️  Loading existing tokenizer...")
+        console.print(f"♻️  Loading existing tokenizer from {tokenizer_path}...")
         tokenizer = BasicTokenizer()
         import json
         with open(tokenizer_path, 'r') as f:
@@ -166,15 +197,18 @@ def main():
     results = []
     
     # ========================================
-    # Model 1: Classic Transformer (baseline)
+    # Model 1: Classic Transformer (SCALED UP)
     # ========================================
     console.print("\n" + "="*60)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        
     from model import SpectralGPT
     from train import GPTConfig
     
     classic_config = GPTConfig(
-        vocab_size=1024, d_model=128, num_layers=4,
-        num_heads=4, d_ff=512, block_size=BLOCK_SIZE,
+        vocab_size=1024, d_model=D_MODEL, num_layers=NUM_LAYERS,
+        num_heads=NUM_HEADS, d_ff=D_MODEL*4, block_size=BLOCK_SIZE,
         dropout=0.1, layer_type="attention", weight_type="standard",
         num_waves=12, num_harmonics=5
     )
@@ -190,13 +224,15 @@ def main():
         torch.cuda.empty_cache()
     
     # ========================================
-    # Model 2: Wave-Native GPT
+    # Model 2: Wave-Native GPT (SCALED UP)
     # ========================================
     console.print("\n" + "="*60)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     
     wave_config = WaveGPTConfig(
-        vocab_size=1024, d_model=128, num_layers=4,
-        num_heads=4, num_waves=16, block_size=BLOCK_SIZE,
+        vocab_size=1024, d_model=D_MODEL, num_layers=NUM_LAYERS,
+        num_heads=NUM_HEADS, num_waves=NUM_WAVES, block_size=BLOCK_SIZE,
         dropout=0.1
     )
     wave_model = WaveGPT(wave_config).to(DEVICE)
@@ -209,12 +245,13 @@ def main():
     # Results Table
     # ========================================
     console.print("\n")
-    table = Table(title="🌊 Wave-Native GPT Benchmark Results")
+    table = Table(title="🌊 Wave-Native GPT Benchmark Results (SCALED UP)")
     table.add_column("Model", style="cyan")
     table.add_column("Params", justify="right")
     table.add_column("Speed (tok/s)", justify="right")
     table.add_column("Perplexity", justify="right")
     table.add_column("Val Loss", justify="right")
+    table.add_column("Peak GPU", justify="right")
     
     for r in results:
         table.add_row(
@@ -222,7 +259,8 @@ def main():
             f"{r['params']/1e6:.2f}M",
             f"{r['speed']:,.0f}",
             f"{r['perplexity']:.2f}",
-            f"{r['val_loss']:.4f}"
+            f"{r['val_loss']:.4f}",
+            f"{r.get('peak_memory', 0):.0f}MB"
         )
     
     console.print(table)
@@ -232,3 +270,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
