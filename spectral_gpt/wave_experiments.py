@@ -295,21 +295,22 @@ def train_experiment(
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
             
-            # Update wave_ratio if available
-            if hasattr(model.embedding, 'wave_ratio') and exp_config.wave_ratio_schedule:
+            # Update wave_ratio if available (handle DataParallel)
+            base_model = model.module if hasattr(model, 'module') else model
+            if hasattr(base_model.embedding, 'wave_ratio') and exp_config.wave_ratio_schedule:
                 target_ratio = get_wave_ratio_target(step)
                 # Softly push toward target
                 with torch.no_grad():
                     # wave_ratio uses sigmoid, so we need inverse sigmoid (logit)
-                    current = torch.sigmoid(model.embedding.wave_ratio).item()
+                    current = torch.sigmoid(base_model.embedding.wave_ratio).item()
                     # Blend toward target
                     new_ratio = current * 0.99 + target_ratio * 0.01
                     # Convert back to logit space
                     new_ratio = max(0.01, min(0.99, new_ratio))
-                    model.embedding.wave_ratio.data = torch.tensor(
+                    base_model.embedding.wave_ratio.data = torch.tensor(
                         math.log(new_ratio / (1 - new_ratio))
                     ).to(device)
-                wave_ratios.append(torch.sigmoid(model.embedding.wave_ratio).item())
+                wave_ratios.append(torch.sigmoid(base_model.embedding.wave_ratio).item())
             
             # Get batch
             x, y = get_batch(train_data, model_config.batch_size, model_config.block_size, device)
