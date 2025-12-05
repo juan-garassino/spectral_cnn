@@ -1,0 +1,32 @@
+{
+  "classic_steps": 5000,
+  "wave_steps": 15000,
+  "classic_lr": 0.0003,
+  "wave_lr": 0.0006,
+  "batch_size": 32,
+  "block_size": 256,
+  "d_model": 384,
+  "num_layers": 8,
+  "num_heads": 8,
+  "num_waves": 48,
+  "num_harmonics": 4,
+  "warmup_steps": 300,
+  "results": [
+    {
+      "model": "Classic Transformer",
+      "params": 15081216,
+      "speed": 48065.04124062684,
+      "val_loss": 1.1434518098831177,
+      "perplexity": 3.137579917907715,
+      "time_seconds": 852.1786092919999
+    },
+    {
+      "model": "Wave-Native GPT \ud83c\udf0a\u26a1",
+      "params": 15433657,
+      "speed": 31203.65885867656,
+      "val_loss": 0.8876658082008362,
+      "perplexity": 2.429452419281006,
+      "time_seconds": 3937.9997248570003
+    }
+  ]
+}
