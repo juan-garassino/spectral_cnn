@@ -33,14 +33,14 @@ from rich.table import Table
 from wave_gpt import WaveGPT, WaveGPTConfig
 from train import BasicTokenizer, get_batch  # From prototyping/
 
-# Config - SCALED UP for 16GB GPU
-STEPS = 5000          # More training for convergence
-BATCH_SIZE = 32       # Keep same (GPU at 98%)
+# Config - SCALED UP for 16GB GPU (using ~12GB now)
+STEPS = 5000          # Keep same
+BATCH_SIZE = 32       # Keep same (larger batch = OOM)
 BLOCK_SIZE = 256      # Keep same
-D_MODEL = 256         # Keep same
-NUM_LAYERS = 6        # Keep same
+D_MODEL = 384         # Scaled up from 256 (1.5x wider)
+NUM_LAYERS = 8        # Scaled up from 6 (more depth)
 NUM_HEADS = 8         # Keep same
-NUM_WAVES = 32        # Keep same
+NUM_WAVES = 48        # Scaled up from 32 (more wave components)
 LR = 3e-4             # Base learning rate
 WARMUP_STEPS = 200    # Warmup steps
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -232,11 +232,10 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
             losses.append(loss.item())
             progress.update(task, advance=1, loss=loss.item())
             
-    # Log every 100 steps with memory
+    # Log every 100 steps
             if (step + 1) % 100 == 0:
                 avg = sum(losses[-100:]) / len(losses[-100:])
-                mem = get_gpu_memory()
-                console.print(f"Step {step+1:4d} | Loss: {loss.item():.4f} | Avg: {avg:.4f} | GPU: {mem:.0f}MB")
+                console.print(f"Step {step+1:4d} | Loss: {loss.item():.4f} | Avg: {avg:.4f}")
     
     elapsed = time.perf_counter() - start_time
     speed = total_tokens / elapsed
@@ -254,8 +253,6 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
     generated = model.generate(idx, max_new_tokens=100, temperature=0.8, top_k=40)
     text = tokenizer.decode(generated[0].tolist())
     console.print(Panel(text[:200], title="Generated Text", border_style="green"))
-    
-    console.print(f"🎯 Peak GPU Memory: [bold]{peak_mem:.0f}MB[/bold] / 16000MB")
     
     return {
         "model": config_name,
@@ -412,7 +409,6 @@ def main():
     table.add_column("Speed (tok/s)", justify="right")
     table.add_column("Perplexity", justify="right")
     table.add_column("Val Loss", justify="right")
-    table.add_column("Peak GPU", justify="right")
     
     for r in results:
         table.add_row(
@@ -420,8 +416,7 @@ def main():
             f"{r['params']/1e6:.2f}M",
             f"{r['speed']:,.0f}",
             f"{r['perplexity']:.2f}",
-            f"{r['val_loss']:.4f}",
-            f"{r.get('peak_memory', 0):.0f}MB"
+            f"{r['val_loss']:.4f}"
         )
     
     console.print(table)

@@ -130,7 +130,9 @@ class WaveInterferenceAttention(nn.Module):
         self.k_phase = nn.Parameter(torch.zeros(1, num_heads, 1, num_waves))
         
         self.dropout = nn.Dropout(dropout)
-        self.scale = (num_waves) ** -0.5
+        
+        # Learnable temperature for attention sharpness
+        self.temperature = nn.Parameter(torch.ones(1) * (num_waves ** 0.5))
         
     def forward(self, x):
         """Wave interference attention"""
@@ -160,7 +162,7 @@ class WaveInterferenceAttention(nn.Module):
         
         # Interference pattern: dot product of normalized waves
         # This gives cosine similarity = wave interference strength
-        interference = torch.matmul(q_norm, k_norm.transpose(-2, -1)) * self.scale  # (B, H, T, T)
+        interference = torch.matmul(q_norm, k_norm.transpose(-2, -1)) / self.temperature  # (B, H, T, T)
         
         # Causal mask
         causal_mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
@@ -198,10 +200,10 @@ class WaveResonanceMLP(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
-        # Use sin activation to maintain wave nature
-        # This creates harmonics like a resonating system
+        # Hybrid activation: GELU for expressivity + sin for wave nature
+        # Pure sin traps gradients; pure GELU loses wave character
         h = self.fc1(x)
-        h = torch.sin(h) + 0.1 * h  # sin + small linear bypass for gradient flow
+        h = F.gelu(h) + 0.1 * torch.sin(h)  # GELU dominant, sin adds harmonics
         h = self.dropout(h)
         h = self.fc2(h)
         h = self.dropout(h)
