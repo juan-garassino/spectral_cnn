@@ -219,6 +219,7 @@ def get_dataset(dataset_name: str, console, max_tokens: int = 10_000_000):
 def train_experiment(
     model: nn.Module,
     train_data: torch.Tensor,
+    val_data: torch.Tensor,
     exp_config: ExperimentConfig,
     model_config: ModelConfig,
     console: Console,
@@ -356,7 +357,7 @@ def train_experiment(
                 model.eval()
                 with torch.no_grad():
                     # Check on a small batch of validation data
-                    val_x, val_y = get_batch(train_data, model_config.batch_size, model_config.block_size, device) # Using train_data as a proxy for fast check, ideally strictly separate, but here keeping simple
+                    val_x, val_y = get_batch(val_data, model_config.batch_size, model_config.block_size, device) 
                     _, val_loss_check = model(val_x, val_y)
                     if val_loss_check.ndim > 0:
                         val_loss_check = val_loss_check.mean()
@@ -370,7 +371,7 @@ def train_experiment(
     # Final eval
     model.eval()
     with torch.no_grad():
-        x, y = get_batch(train_data, model_config.batch_size, model_config.block_size, device)
+        x, y = get_batch(val_data, model_config.batch_size, model_config.block_size, device)
         _, val_loss = model(x, y)
         
         # Handle DataParallel output (one loss per dim)
@@ -441,8 +442,10 @@ def run_ablation_suite(
     
     # Encode data
     data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
-    train_data = data[:int(0.9 * len(data))]
-    console.print(f"📊 Training tokens: {len(train_data):,}")
+    n = int(0.8 * len(data))
+    train_data = data[:n]
+    val_data = data[n:]
+    console.print(f"📊 Tokens: Train {len(train_data):,} | Val {len(val_data):,}")
     
     results = {}
     
@@ -473,7 +476,7 @@ def run_ablation_suite(
         
         # Train
         result = train_experiment(
-            model, train_data, exp_config, model_config, console, device
+            model, train_data, val_data, exp_config, model_config, console, device
         )
         results[exp_name] = result
         
