@@ -24,7 +24,8 @@ class WaveGPTConfig:
     num_layers: int
     num_heads: int
     num_waves: int         # Number of wave components per token
-    block_size: int        # Context length
+    num_harmonics: int = 4 # Harmonics per wave (1f, 2f, 3f, 4f)
+    block_size: int = 256  # Context length
     dropout: float = 0.1
 
 
@@ -34,65 +35,88 @@ class WaveGPTConfig:
 
 class WavePacketEmbedding(nn.Module):
     """
-    Embed tokens as wave packets instead of discrete vectors.
+    Embed tokens as wave packets with HARMONICS.
     
-    Each token becomes a superposition of waves:
-    - Learnable base frequency per token
-    - Learnable phase offset per token  
-    - Learnable amplitude per wave component
+    Each token has:
+    - Base frequencies (fundamental pitches)
+    - Harmonic series (1f, 2f, 3f, 4f...) like a musical instrument
+    - Learnable amplitude per harmonic (timbre)
     
-    Output: Wave state that can interfere with other tokens
+    This creates richer superpositions that can represent complex patterns.
     """
-    def __init__(self, vocab_size, d_model, num_waves=16):
+    def __init__(self, vocab_size, d_model, num_waves=16, num_harmonics=4):
         super().__init__()
         self.d_model = d_model
         self.num_waves = num_waves
+        self.num_harmonics = num_harmonics
         
-        # Each token has learnable wave parameters
-        # Frequencies: what "pitch" does this token resonate at?
-        self.token_freqs = nn.Parameter(torch.randn(vocab_size, num_waves) * 0.5 + 1.0)
+        # Base frequencies per token (fundamental pitch)
+        # Different tokens resonate at different frequencies
+        self.base_freqs = nn.Parameter(
+            torch.linspace(0.5, 5.0, num_waves).unsqueeze(0).expand(vocab_size, -1) +
+            torch.randn(vocab_size, num_waves) * 0.1
+        )
+        
+        # Harmonic multipliers: 1, 2, 3, 4... (physics-based, fixed)
+        self.register_buffer('harmonic_mults', torch.arange(1, num_harmonics + 1).float())
+        
+        # Learnable amplitude per harmonic per wave per token
+        # This is like the "timbre" - different tokens have different harmonic profiles
+        self.harmonic_amps = nn.Parameter(
+            torch.randn(vocab_size, num_waves, num_harmonics) * 0.1 / math.sqrt(num_harmonics)
+        )
         
         # Phases: where in the wave cycle does this token start?
-        self.token_phases = nn.Parameter(torch.rand(vocab_size, num_waves) * 2 * math.pi)
-        
-        # Amplitudes: how strong is each wave component?
-        self.token_amps = nn.Parameter(torch.randn(vocab_size, num_waves) * 0.1)
+        self.phases = nn.Parameter(torch.rand(vocab_size, num_waves) * 2 * math.pi)
         
         # Project wave state to d_model dimension
-        self.wave_to_embed = nn.Linear(num_waves * 2, d_model)  # *2 for sin+cos
+        # num_waves * num_harmonics * 2 (sin + cos)
+        wave_dim = num_waves * num_harmonics * 2
+        self.wave_to_embed = nn.Linear(wave_dim, d_model)
         
-        # Learnable positional wave (position = phase modulation)
+        # Positional wave modulation
         self.pos_freq = nn.Parameter(torch.randn(1, 1, num_waves) * 0.1)
+        
+        # LayerNorm for stability (no cheating with discrete embedding!)
+        self.ln = nn.LayerNorm(d_model)
         
     def forward(self, token_ids):
         """
         token_ids: (B, T) - discrete token indices
-        returns: (B, T, d_model) - continuous wave embeddings
+        returns: (B, T, d_model) - PURE wave embeddings with harmonics (no cheating!)
         """
         B, T = token_ids.shape
         device = token_ids.device
         
         # Get wave parameters for each token
-        freqs = self.token_freqs[token_ids]    # (B, T, num_waves)
-        phases = self.token_phases[token_ids]  # (B, T, num_waves)
-        amps = self.token_amps[token_ids]      # (B, T, num_waves)
+        base_f = self.base_freqs[token_ids]    # (B, T, num_waves)
+        phases = self.phases[token_ids]         # (B, T, num_waves)
+        harm_a = self.harmonic_amps[token_ids]  # (B, T, num_waves, num_harmonics)
         
-        # Add positional encoding as phase modulation
+        # Positional modulation
         positions = torch.arange(T, device=device).float().view(1, T, 1)
-        pos_phase = positions * self.pos_freq  # Position affects phase
+        pos_phase = positions * self.pos_freq
         
-        # Generate wave packet: superposition of sin and cos waves
-        # This creates a rich continuous representation
-        wave_phase = freqs * 2 * math.pi + phases + pos_phase
+        # Generate harmonics: for each base frequency, create 1f, 2f, 3f, 4f...
+        # base_f: (B, T, W) -> expand to (B, T, W, H)
+        freqs = base_f.unsqueeze(-1) * self.harmonic_mults  # (B, T, W, H)
         
-        sin_waves = amps * torch.sin(wave_phase)  # (B, T, num_waves)
-        cos_waves = amps * torch.cos(wave_phase)  # (B, T, num_waves)
+        # Phase applies to all harmonics
+        wave_phase = freqs * 2 * math.pi + phases.unsqueeze(-1) + pos_phase.unsqueeze(-1)
         
-        # Concatenate sin and cos for full wave representation
-        wave_state = torch.cat([sin_waves, cos_waves], dim=-1)  # (B, T, num_waves*2)
+        # Weighted sum of sin/cos harmonics
+        sin_waves = harm_a * torch.sin(wave_phase)  # (B, T, W, H)
+        cos_waves = harm_a * torch.cos(wave_phase)  # (B, T, W, H)
         
-        # Project to embedding dimension
+        # Flatten: (B, T, W*H*2)
+        wave_state = torch.cat([
+            sin_waves.reshape(B, T, -1),
+            cos_waves.reshape(B, T, -1)
+        ], dim=-1)
+        
+        # Project to embedding dimension - PURE WAVE, NO CHEATING!
         embeddings = self.wave_to_embed(wave_state)  # (B, T, d_model)
+        embeddings = self.ln(embeddings)  # Stabilize
         
         return embeddings
 
@@ -270,9 +294,9 @@ class WaveGPT(nn.Module):
         super().__init__()
         self.config = config
         
-        # Wave packet embedding (tokens as waves)
+        # Wave packet embedding (tokens as waves with harmonics)
         self.embedding = WavePacketEmbedding(
-            config.vocab_size, config.d_model, config.num_waves
+            config.vocab_size, config.d_model, config.num_waves, config.num_harmonics
         )
         
         # Stack of wave blocks

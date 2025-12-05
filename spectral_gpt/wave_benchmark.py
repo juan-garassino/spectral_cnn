@@ -34,15 +34,17 @@ from wave_gpt import WaveGPT, WaveGPTConfig
 from train import BasicTokenizer, get_batch  # From prototyping/
 
 # Config - SCALED UP for 16GB GPU (using ~12GB now)
-STEPS = 5000          # Keep same
+CLASSIC_STEPS = 5000  # Steps for Classic Transformer
+WAVE_STEPS = 7500     # 50% MORE steps for Wave (to achieve second descent)
 BATCH_SIZE = 32       # Keep same (larger batch = OOM)
 BLOCK_SIZE = 256      # Keep same
 D_MODEL = 384         # Scaled up from 256 (1.5x wider)
 NUM_LAYERS = 8        # Scaled up from 6 (more depth)
 NUM_HEADS = 8         # Keep same
 NUM_WAVES = 48        # Scaled up from 32 (more wave components)
+NUM_HARMONICS = 4     # Harmonics per wave
 LR = 3e-4             # Base learning rate
-WARMUP_STEPS = 200    # Warmup steps
+WARMUP_STEPS = 300    # More warmup for stability
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -160,12 +162,13 @@ def save_wave_visualizations(model, losses, name, save_dir):
             plt.savefig(f"{save_dir}/{name.replace(' ', '_')}_attention_phases.png", dpi=150, bbox_inches='tight')
             plt.close()
 
-def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
-    """Benchmark a single model"""
+def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_steps=5000):
+    """Benchmark a single model with configurable steps"""
     console.print(Panel(f"[bold cyan]{config_name}[/bold cyan]", title="🧪 Model Config", border_style="cyan"))
     
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
+    console.print(f"🔄 Training Steps: [bold]{num_steps}[/bold]")
     
     # Training with cosine LR schedule
     console.print(f"⚙️  Learning Rate: [bold]{LR:.0e}[/bold] (cosine decay, {WARMUP_STEPS} warmup)")
@@ -175,7 +178,7 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
     def get_lr(step):
         if step < WARMUP_STEPS:
             return LR * step / WARMUP_STEPS
-        progress = (step - WARMUP_STEPS) / (STEPS - WARMUP_STEPS)
+        progress = (step - WARMUP_STEPS) / (num_steps - WARMUP_STEPS)
         return LR * 0.5 * (1 + math.cos(math.pi * progress))
     
     model.train()
@@ -204,9 +207,9 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
         TimeElapsedColumn(),
         console=console
     ) as progress:
-        task = progress.add_task(f"Training {config_name}", total=STEPS, loss=0.0)
+        task = progress.add_task(f"Training {config_name}", total=num_steps, loss=0.0)
         
-        for step in range(STEPS):
+        for step in range(num_steps):
             # Update learning rate
             lr = get_lr(step)
             for param_group in optimizer.param_groups:
@@ -270,9 +273,10 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer):
 def main():
     console = Console()
     console.print(Panel.fit(
-        "[bold magenta]🌊 WAVE-NATIVE GPT BENCHMARK (SCALED UP)[/bold magenta]\n\n"
-        f"d_model={D_MODEL} | layers={NUM_LAYERS} | heads={NUM_HEADS} | waves={NUM_WAVES}\n"
-        f"batch={BATCH_SIZE} | context={BLOCK_SIZE} | steps={STEPS}",
+        "[bold magenta]🌊 WAVE-NATIVE GPT BENCHMARK (NO CHEATING!)[/bold magenta]\n\n"
+        f"d_model={D_MODEL} | layers={NUM_LAYERS} | heads={NUM_HEADS} | waves={NUM_WAVES}×{NUM_HARMONICS}H\n"
+        f"batch={BATCH_SIZE} | context={BLOCK_SIZE}\n"
+        f"Classic: {CLASSIC_STEPS} steps | Wave: {WAVE_STEPS} steps (+50%)",
         border_style="magenta"
     ))
     
@@ -345,7 +349,7 @@ def main():
     )
     classic_model = SpectralGPT(classic_config).to(DEVICE)
     
-    res = run_wave_benchmark("Classic Transformer", classic_model, train_data, console, tokenizer)
+    res = run_wave_benchmark("Classic Transformer", classic_model, train_data, console, tokenizer, num_steps=CLASSIC_STEPS)
     if res:
         results.append(res)
     
@@ -355,7 +359,7 @@ def main():
         torch.cuda.empty_cache()
     
     # ========================================
-    # Model 2: Wave-Native GPT (SCALED UP)
+    # Model 2: Wave-Native GPT (PURE WAVE - NO CHEATING!)
     # ========================================
     console.print("\n" + "="*60)
     if torch.cuda.is_available():
@@ -363,12 +367,13 @@ def main():
     
     wave_config = WaveGPTConfig(
         vocab_size=1024, d_model=D_MODEL, num_layers=NUM_LAYERS,
-        num_heads=NUM_HEADS, num_waves=NUM_WAVES, block_size=BLOCK_SIZE,
-        dropout=0.1
+        num_heads=NUM_HEADS, num_waves=NUM_WAVES, num_harmonics=NUM_HARMONICS,
+        block_size=BLOCK_SIZE, dropout=0.1
     )
     wave_model = WaveGPT(wave_config).to(DEVICE)
     
-    res = run_wave_benchmark("Wave-Native GPT 🌊", wave_model, train_data, console, tokenizer)
+    # Wave gets 50% more steps to achieve second descent!
+    res = run_wave_benchmark("Wave-Native GPT 🌊", wave_model, train_data, console, tokenizer, num_steps=WAVE_STEPS)
     if res:
         results.append(res)
     
