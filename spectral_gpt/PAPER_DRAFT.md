@@ -1,8 +1,8 @@
 # Wave-Native GPT: From Discrete Tokens to Continuous Fields in Language Modeling
 
-**Authors:** [Your Name]  
-**Affiliation:** [Your Institution]  
-**Date:** December 2024  
+**Authors:** Juan Garassino,   
+**Affiliation:** Juan Garassino  
+**Date:** December 2025  
 **Version:** 0.2 (Academic Draft)
 
 ---
@@ -175,6 +175,17 @@ This provides a natural mechanism for:
 - **Selective suppression**: The model can learn to anti-correlate tokens that should not co-occur.
 
 Standard attention must learn these behaviors through carefully balanced positive weights; wave interference provides them as built-in inductive bias.
+
+### 3.2.1 Advanced: Pure Wave Attention (Softmax-Free)
+
+While the default implementation uses softmax to normalize interference scores (for stability), our architecture supports a **Pure Wave Mode** that removes softmax entirely:
+
+$$\mathbf{Out} = \left( \sigma(\mathbf{Interference}) \right) \cdot \mathbf{V}$$
+
+In this mode:
+- **Negative interference is real**: $180^\circ$ phase difference creates effectively "negative probability" (suppression).
+- **Unbounded dynamics**: Attention is not forced to sum to 1, allowing the model to attend to "nothing" (silence) or "everything" (resonance) naturally.
+- **Truly unitary-like**: Closer to quantum unitary evolution than probability distribution remixing.
 
 ### 3.3 Information Flow: From Waves to Tokens
 
@@ -536,6 +547,36 @@ class QuantumFieldEntanglementLoss(nn.Module):
         coherence_loss = (A_pred * A_target * phase_error * mask).sum() / (mask.sum() + 1e-8)
         
         return ce_loss + self.lambda_coherence * coherence_loss
+
+
+### A.4 Pure Wave Attention (Softmax-Free)
+
+```python
+class PureWaveAttention(nn.Module):
+    def forward(self, x):
+        # Project to frequency (f) and phase (p) space
+        q_f, k_f = self.q_freq(x), self.k_freq(x)
+        q_p, k_p = self.q_phase(x), self.k_phase(x)
+        
+        # Generate wave states at each position
+        t_pos = torch.arange(T, device=x.device)
+        q_waves = torch.sin(q_f * t_pos + q_p)
+        k_waves = torch.sin(k_f * t_pos + k_p)
+        
+        # PURE INTERFERENCE: Cosine similarity
+        # Normalized dot product = cos(delta_phi)
+        # Range [-1, 1], allowing destructive interference
+        q_norm = F.normalize(q_waves, dim=-1)
+        k_norm = F.normalize(k_waves, dim=-1)
+        
+        interference = torch.matmul(q_norm, k_norm.transpose(-2, -1))
+        
+        # No Softmax! Scaled interference drives values directly
+        attn = interference / num_attended.sqrt()
+        out = torch.matmul(attn, v)
+        
+        return self.o_proj(out)
+```
 ```
 
 ---

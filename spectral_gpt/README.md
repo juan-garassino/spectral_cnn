@@ -118,7 +118,8 @@ python wave_benchmark.py
 python wave_experiments.py --experiment all --steps 20000
 
 # Individual experiments
-python wave_experiments.py --experiment full_physics  # RGD + QFE
+python wave_experiments.py --experiment full_physics  # RGD + QFE (Recommended)
+python wave_experiments.py --experiment pure_wave     # No Softmax (Experimental) 🌊
 python wave_experiments.py --experiment rgd_only      # RGD only  
 python wave_experiments.py --experiment qfe_only      # QFE only
 python wave_experiments.py --experiment baseline      # No physics

@@ -56,6 +56,7 @@ class ExperimentConfig:
     name: str
     use_rgd: bool = False
     use_qfe: bool = False
+    pure_wave_attention: bool = False  # New flag for pure attention
     rgd_strength: float = 0.3
     rgd_warmup: int = 500
     qfe_lambda: float = 0.05
@@ -69,6 +70,11 @@ ABLATION_EXPERIMENTS = {
     "full_physics": ExperimentConfig(
         name="Full Physics (RGD + QFE)",
         use_rgd=True, use_qfe=True
+    ),
+    "pure_wave": ExperimentConfig(
+        name="Pure Wave (No Softmax) 🌊",
+        use_rgd=True, use_qfe=True,
+        pure_wave_attention=True
     ),
     "rgd_only": ExperimentConfig(
         name="RGD Only",
@@ -345,7 +351,18 @@ def train_experiment(
             if (step + 1) % 500 == 0:
                 avg = sum(losses[-500:]) / len(losses[-500:])
                 wave_r = wave_ratios[-1] if wave_ratios else 0.5
-                console.print(f"Step {step+1:5d} | Loss: {loss.item():.4f} | Avg: {avg:.4f} | WaveRatio: {wave_r:.3f}")
+                
+                # Fast validation check
+                model.eval()
+                with torch.no_grad():
+                    # Check on a small batch of validation data
+                    val_x, val_y = get_batch(train_data, model_config.batch_size, model_config.block_size, device) # Using train_data as a proxy for fast check, ideally strictly separate, but here keeping simple
+                    _, val_loss_check = model(val_x, val_y)
+                    if val_loss_check.ndim > 0:
+                        val_loss_check = val_loss_check.mean()
+                model.train()
+                
+                console.print(f"Step {step+1:5d} | Train: {loss.item():.4f} | Val: {val_loss_check.item():.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
     
     elapsed = time.perf_counter() - start_time
     speed = total_tokens / elapsed
@@ -355,6 +372,10 @@ def train_experiment(
     with torch.no_grad():
         x, y = get_batch(train_data, model_config.batch_size, model_config.block_size, device)
         _, val_loss = model(x, y)
+        
+        # Handle DataParallel output (one loss per dim)
+        if val_loss.ndim > 0:
+            val_loss = val_loss.mean()
     
     return {
         "name": exp_config.name,
@@ -440,7 +461,8 @@ def run_ablation_suite(
             num_waves=model_config.num_waves,
             num_harmonics=model_config.num_harmonics,
             block_size=model_config.block_size,
-            dropout=0.1
+            dropout=0.1,
+            pure_wave_attention=getattr(exp_config, 'pure_wave_attention', False)
         )
         model = WaveGPT(wave_config).to(device)
         

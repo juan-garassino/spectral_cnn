@@ -27,6 +27,7 @@ class WaveGPTConfig:
     num_harmonics: int = 4 # Harmonics per wave (1f, 2f, 3f, 4f)
     block_size: int = 256  # Context length
     dropout: float = 0.1
+    pure_wave_attention: bool = False  # True = NO SOFTMAX, pure interference
 
 
 # ==========================================
@@ -226,6 +227,118 @@ class WaveInterferenceAttention(nn.Module):
 
 
 # ==========================================
+# PURE Wave Attention (NO SOFTMAX!)
+# ==========================================
+
+class PureWaveAttention(nn.Module):
+    """
+    TRUE wave interference attention - NO SOFTMAX, NO DOT PRODUCT.
+    
+    This is the pure wave paradigm:
+    - Attention weights come directly from wave interference
+    - Negative values = destructive interference = SUPPRESSION
+    - No softmax normalization - pure field dynamics
+    
+    Key differences from standard attention:
+    1. No softmax: interference can be negative (destructive)
+    2. No Q/K dot product: uses phase-based interference
+    3. Bounded naturally: cosine similarity is in [-1, 1]
+    """
+    def __init__(self, d_model, num_heads, num_waves=16, dropout=0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+        self.head_dim = d_model // num_heads
+        self.num_waves = num_waves
+        
+        # Wave projections - map to frequency/phase space
+        self.q_freq = nn.Linear(d_model, num_heads * num_waves)
+        self.k_freq = nn.Linear(d_model, num_heads * num_waves)
+        self.q_phase = nn.Linear(d_model, num_heads * num_waves)
+        self.k_phase = nn.Linear(d_model, num_heads * num_waves)
+        
+        # Value projection (still needed to carry information)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.o_proj = nn.Linear(d_model, d_model)
+        
+        # Learnable interference strength per head
+        self.interference_scale = nn.Parameter(torch.ones(num_heads, 1, 1))
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x):
+        """
+        Pure wave interference attention.
+        
+        Returns attention based on phase alignment, not learned similarity.
+        """
+        B, T, C = x.shape
+        
+        # Project to wave parameters (frequency and phase)
+        q_f = self.q_freq(x).view(B, T, self.num_heads, self.num_waves)   # (B, T, H, W)
+        k_f = self.k_freq(x).view(B, T, self.num_heads, self.num_waves)   # (B, T, H, W)
+        q_p = self.q_phase(x).view(B, T, self.num_heads, self.num_waves)  # (B, T, H, W)
+        k_p = self.k_phase(x).view(B, T, self.num_heads, self.num_waves)  # (B, T, H, W)
+        
+        # Value projection
+        v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim)      # (B, T, H, D)
+        
+        # Transpose: (B, H, T, ...)
+        q_f = q_f.transpose(1, 2)  # (B, H, T, W)
+        k_f = k_f.transpose(1, 2)  # (B, H, T, W)
+        q_p = q_p.transpose(1, 2)  # (B, H, T, W)
+        k_p = k_p.transpose(1, 2)  # (B, H, T, W)
+        v = v.transpose(1, 2)      # (B, H, T, D)
+        
+        # Compute wave at each position
+        # Wave: A * sin(f * t + phase) where t is position index
+        t_pos = torch.arange(T, device=x.device).float().view(1, 1, T, 1)
+        
+        # Query waves: sin(q_freq * pos + q_phase)
+        q_waves = torch.sin(q_f * t_pos + q_p)  # (B, H, T, W)
+        
+        # Key waves: sin(k_freq * pos + k_phase)  
+        k_waves = torch.sin(k_f * t_pos + k_p)  # (B, H, T, W)
+        
+        # PURE WAVE INTERFERENCE: cosine of phase difference
+        # When waves are in phase: high positive interference
+        # When waves are out of phase: negative interference (SUPPRESSION!)
+        
+        # Normalize across wave dimension for bounded output
+        q_norm = F.normalize(q_waves, dim=-1)
+        k_norm = F.normalize(k_waves, dim=-1)
+        
+        # Interference = dot product of normalized waves = cosine similarity
+        # Range: [-1, 1] - NEGATIVE VALUES ALLOWED!
+        interference = torch.matmul(q_norm, k_norm.transpose(-2, -1))  # (B, H, T, T)
+        
+        # Scale per head
+        interference = interference * self.interference_scale
+        
+        # Causal masking: future positions get ZERO (not -inf!)
+        # This is different from softmax-based attention
+        causal_mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
+        interference = interference.masked_fill(causal_mask, 0.0)
+        
+        # NO SOFTMAX! Pure interference weights
+        # Normalize by number of attended positions for stability
+        num_attended = torch.arange(1, T + 1, device=x.device).float().view(1, 1, T, 1)
+        attn = interference / num_attended.sqrt()  # Scale by sqrt(n) like standard attention
+        
+        # Dropout on attention (optional)
+        attn = self.dropout(attn)
+        
+        # Apply to values - negative attention = SUPPRESSION
+        out = torch.matmul(attn, v)  # (B, H, T, D)
+        
+        # Reshape and project
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        out = self.o_proj(out)
+        
+        return out
+
+
+# ==========================================
 # Wave MLP (Resonance Network)
 # ==========================================
 
@@ -263,10 +376,21 @@ class WaveBlock(nn.Module):
         super().__init__()
         self.ln1 = nn.LayerNorm(config.d_model)
         self.ln2 = nn.LayerNorm(config.d_model)
-        self.attn = WaveInterferenceAttention(
-            config.d_model, config.num_heads, 
-            config.num_waves, config.dropout
-        )
+        
+        # Choose attention type based on config
+        if getattr(config, 'pure_wave_attention', False):
+            # PURE wave attention - NO SOFTMAX!
+            self.attn = PureWaveAttention(
+                config.d_model, config.num_heads, 
+                config.num_waves, config.dropout
+            )
+        else:
+            # Hybrid wave attention (with softmax)
+            self.attn = WaveInterferenceAttention(
+                config.d_model, config.num_heads, 
+                config.num_waves, config.dropout
+            )
+        
         self.mlp = WaveResonanceMLP(
             config.d_model, config.d_model * 4, config.dropout
         )
