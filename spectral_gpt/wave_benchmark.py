@@ -32,6 +32,7 @@ from rich.table import Table
 
 from wave_gpt import WaveGPT, WaveGPTConfig
 from train import BasicTokenizer, get_batch  # From prototyping/
+from physics_optim import ResonantGradientDescent, QuantumFieldEntanglementLoss
 
 # Config - SCALED UP for 16GB GPU (using ~12GB now)
 CLASSIC_STEPS = 5000  # Steps for Classic Transformer
@@ -49,6 +50,15 @@ CLASSIC_LR = 3e-4     # Standard LR for Classic
 WAVE_LR = 6e-4        # 2x higher LR for Wave (faster convergence)
 WARMUP_STEPS = 300    # Warmup for stability
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# ⚡ Physics-Informed Optimization Flags
+USE_RGD = True        # Resonant Gradient Descent for Wave model
+RGD_STRENGTH = 0.3    # Resonance gating strength (0=off, 1=full)
+RGD_WARMUP = 500      # Steps to gradually enable resonance
+
+USE_QFE = True        # Quantum Field Entanglement Loss for Wave model
+QFE_LAMBDA = 0.05     # Weight for phase coherence term (start small!)
+QFE_THRESHOLD = 0.01  # Amplitude threshold for phase computation
 
 
 def get_gpu_memory():
@@ -361,23 +371,47 @@ def save_wave_visualizations(model, losses, name, save_dir):
         plt.savefig(f"{save_dir}/{name.replace(' ', '_')}_wave_surface.png", dpi=150, bbox_inches='tight')
         plt.close()
 
-def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_steps=5000, lr=3e-4, use_radam=False):
-    """Benchmark a single model with configurable steps and LR"""
+def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_steps=5000, lr=3e-4, 
+                        use_radam=False, use_rgd=False, use_qfe=False):
+    """Benchmark a single model with configurable steps, LR, optimizer, and loss"""
     console.print(Panel(f"[bold cyan]{config_name}[/bold cyan]", title="🧪 Model Config", border_style="cyan"))
     
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
     console.print(f"🔄 Training Steps: [bold]{num_steps}[/bold]")
     
-    # Training with cosine LR schedule
-    optimizer_name = "RAdam" if use_radam else "AdamW"
-    console.print(f"⚙️  Learning Rate: [bold]{lr:.0e}[/bold] | Optimizer: {optimizer_name} (cosine decay, {WARMUP_STEPS} warmup)")
-    
-    # Use RAdam for wave models (better for periodic parameters)
-    if use_radam:
+    # Select optimizer
+    if use_rgd:
+        optimizer_name = "⚡RGD"
+        optimizer = ResonantGradientDescent(
+            model.parameters(), 
+            lr=lr, 
+            resonance_strength=RGD_STRENGTH,
+            warmup_steps=RGD_WARMUP,
+            weight_decay=0.01
+        )
+        console.print(f"⚙️  Optimizer: [bold magenta]{optimizer_name}[/bold magenta] (strength={RGD_STRENGTH}, warmup={RGD_WARMUP})")
+    elif use_radam:
+        optimizer_name = "RAdam"
         optimizer = torch.optim.RAdam(model.parameters(), lr=lr, weight_decay=0.01)
+        console.print(f"⚙️  Optimizer: [bold]{optimizer_name}[/bold]")
     else:
+        optimizer_name = "AdamW"
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+        console.print(f"⚙️  Optimizer: [bold]{optimizer_name}[/bold]")
+    
+    console.print(f"📈 Learning Rate: [bold]{lr:.0e}[/bold] (cosine decay, {WARMUP_STEPS} warmup)")
+    
+    # Select loss function
+    if use_qfe:
+        loss_fn = QuantumFieldEntanglementLoss(
+            lambda_coherence=QFE_LAMBDA,
+            amplitude_threshold=QFE_THRESHOLD
+        )
+        console.print(f"🌌 Loss: [bold magenta]QFE[/bold magenta] (λ={QFE_LAMBDA}, threshold={QFE_THRESHOLD})")
+    else:
+        loss_fn = None  # Use model's built-in CE loss
+        console.print(f"📉 Loss: [bold]Cross-Entropy[/bold]")
     
     # Cosine schedule with warmup
     def get_lr(step):
@@ -388,6 +422,7 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
     
     model.train()
     losses = []
+    coherence_losses = []
     
     console.print("🔥 Warming up...")
     try:
@@ -416,15 +451,23 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
         
         for step in range(num_steps):
             # Update learning rate
-            lr = get_lr(step)
+            current_lr = get_lr(step)
             for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
+                param_group['lr'] = current_lr
             
             x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
             total_tokens += x.numel()
             
             # Forward
-            _, loss = model(x, y)
+            logits, ce_loss = model(x, y)
+            
+            # Compute loss (QFE or standard CE)
+            if use_qfe and loss_fn is not None:
+                loss_dict = loss_fn(logits, y, return_components=True)
+                loss = loss_dict['total']
+                coherence_losses.append(loss_dict['coherence'].item())
+            else:
+                loss = ce_loss
             
             # Check for NaN
             if torch.isnan(loss) or torch.isinf(loss):
@@ -481,8 +524,8 @@ def main():
         "[bold magenta]🌊 WAVE-NATIVE GPT BENCHMARK (PUSH TO MATCH!)[/bold magenta]\n\n"
         f"d_model={D_MODEL} | layers={NUM_LAYERS} | heads={NUM_HEADS} | waves={NUM_WAVES}×{NUM_HARMONICS}H\n"
         f"batch={BATCH_SIZE} | context={BLOCK_SIZE}\n"
-        f"Classic: {CLASSIC_STEPS} steps @ {CLASSIC_LR:.0e} (AdamW)\n"
-        f"Wave:    {WAVE_STEPS} steps @ {WAVE_LR:.0e} (RAdam) ← 3x steps, 2x LR!",
+        f"Classic: {CLASSIC_STEPS} steps @ {CLASSIC_LR:.0e} (AdamW + CE)\n"
+        f"Wave:    {WAVE_STEPS} steps @ {WAVE_LR:.0e} (⚡RGD + 🌌QFE)",
         border_style="magenta"
     ))
     
@@ -566,7 +609,7 @@ def main():
         torch.cuda.empty_cache()
     
     # ========================================
-    # Model 2: Wave-Native GPT (PUSH TO MATCH!)
+    # Model 2: Wave-Native GPT (PHYSICS-INFORMED!)
     # ========================================
     console.print("\n" + "="*60)
     if torch.cuda.is_available():
@@ -579,9 +622,12 @@ def main():
     )
     wave_model = WaveGPT(wave_config).to(DEVICE)
     
-    # Wave gets 3x steps + 2x LR + RAdam optimizer!
-    res = run_wave_benchmark("Wave-Native GPT 🌊", wave_model, train_data, console, tokenizer, 
-                             num_steps=WAVE_STEPS, lr=WAVE_LR, use_radam=True)
+    # Wave gets physics-informed optimization: RGD + QFE!
+    res = run_wave_benchmark(
+        "Wave-Native GPT 🌊⚡", wave_model, train_data, console, tokenizer, 
+        num_steps=WAVE_STEPS, lr=WAVE_LR, 
+        use_radam=False, use_rgd=USE_RGD, use_qfe=USE_QFE
+    )
     if res:
         results.append(res)
     

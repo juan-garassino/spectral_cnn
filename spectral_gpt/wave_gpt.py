@@ -43,6 +43,10 @@ class WavePacketEmbedding(nn.Module):
     - Learnable amplitude per harmonic (timbre)
     
     This creates richer superpositions that can represent complex patterns.
+    
+    Training Strategy: 
+    - Start with small wave contribution + standard embedding (for gradient flow)
+    - Gradually increase wave contribution as training progresses
     """
     def __init__(self, vocab_size, d_model, num_waves=16, num_harmonics=4):
         super().__init__()
@@ -53,7 +57,7 @@ class WavePacketEmbedding(nn.Module):
         # Base frequencies per token (fundamental pitch)
         # Different tokens resonate at different frequencies
         self.base_freqs = nn.Parameter(
-            torch.linspace(0.5, 5.0, num_waves).unsqueeze(0).expand(vocab_size, -1) +
+            torch.linspace(0.5, 5.0, num_waves).unsqueeze(0).expand(vocab_size, -1).clone() +
             torch.randn(vocab_size, num_waves) * 0.1
         )
         
@@ -61,9 +65,9 @@ class WavePacketEmbedding(nn.Module):
         self.register_buffer('harmonic_mults', torch.arange(1, num_harmonics + 1).float())
         
         # Learnable amplitude per harmonic per wave per token
-        # This is like the "timbre" - different tokens have different harmonic profiles
+        # Initialize with meaningful scale for gradient flow
         self.harmonic_amps = nn.Parameter(
-            torch.randn(vocab_size, num_waves, num_harmonics) * 0.1 / math.sqrt(num_harmonics)
+            torch.randn(vocab_size, num_waves, num_harmonics) * 0.5 / math.sqrt(num_harmonics * num_waves)
         )
         
         # Phases: where in the wave cycle does this token start?
@@ -77,13 +81,18 @@ class WavePacketEmbedding(nn.Module):
         # Positional wave modulation
         self.pos_freq = nn.Parameter(torch.randn(1, 1, num_waves) * 0.1)
         
-        # LayerNorm for stability (no cheating with discrete embedding!)
+        # Standard embedding as gradient bootstrap (will be phased out)
+        self.simple_embed = nn.Embedding(vocab_size, d_model)
+        # Start with 50% wave, 50% standard - wave will take over during training
+        self.wave_ratio = nn.Parameter(torch.tensor(0.5))
+        
+        # LayerNorm for final output stability
         self.ln = nn.LayerNorm(d_model)
         
     def forward(self, token_ids):
         """
         token_ids: (B, T) - discrete token indices
-        returns: (B, T, d_model) - PURE wave embeddings with harmonics (no cheating!)
+        returns: (B, T, d_model) - wave embeddings with gradient-safe initialization
         """
         B, T = token_ids.shape
         device = token_ids.device
@@ -114,9 +123,19 @@ class WavePacketEmbedding(nn.Module):
             cos_waves.reshape(B, T, -1)
         ], dim=-1)
         
-        # Project to embedding dimension - PURE WAVE, NO CHEATING!
-        embeddings = self.wave_to_embed(wave_state)  # (B, T, d_model)
-        embeddings = self.ln(embeddings)  # Stabilize
+        # Project to embedding dimension
+        wave_embed = self.wave_to_embed(wave_state)  # (B, T, d_model)
+        
+        # Standard embedding for gradient bootstrap
+        simple_embed = self.simple_embed(token_ids)
+        
+        # Blend: wave_ratio controls wave vs standard contribution
+        # Clamp wave_ratio to [0, 1] range
+        ratio = torch.sigmoid(self.wave_ratio)  # Smooth 0-1
+        embeddings = ratio * wave_embed + (1 - ratio) * simple_embed
+        
+        # LayerNorm for stability
+        embeddings = self.ln(embeddings)
         
         return embeddings
 
