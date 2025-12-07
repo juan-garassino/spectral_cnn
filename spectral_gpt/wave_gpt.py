@@ -309,10 +309,12 @@ class PureWaveAttention(nn.Module):
         k_norm = F.normalize(k_waves, dim=-1)
         
         # Interference = dot product of normalized waves = cosine similarity
-        # Range: [-1, 1] - NEGATIVE VALUES ALLOWED!
-        interference = torch.matmul(q_norm, k_norm.transpose(-2, -1))  # (B, H, T, T)
+        # Range: [-1, 1]
+        # Variance of dot product of normalized vectors is 1/dim.
+        # We multiply by sqrt(dim) to restore unit variance.
+        interference = torch.matmul(q_norm, k_norm.transpose(-2, -1)) * (self.num_waves ** 0.5)
         
-        # Scale per head
+        # Scale per head (learnable)
         interference = interference * self.interference_scale
         
         # Causal masking: future positions get ZERO (not -inf!)
