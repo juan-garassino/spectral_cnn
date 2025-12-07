@@ -62,7 +62,7 @@ class ExperimentConfig:
     qfe_lambda: float = 0.05
     qfe_threshold: float = 0.01
     lr: float = 6e-4
-    steps: int = 20000
+    steps: int = 2000#0
     wave_ratio_schedule: bool = True  # Schedule wave_ratio from 0.5 to 0.9
 
 
@@ -334,6 +334,8 @@ def train_experiment(
                 coherence_losses.append(loss_dict['coherence'].item())
             else:
                 loss = ce_loss
+                if loss.ndim > 0:
+                    loss = loss.mean()
             
             # Check for NaN
             if torch.isnan(loss) or torch.isinf(loss):
