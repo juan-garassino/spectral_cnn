@@ -608,7 +608,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="shakespeare",
                         choices=["shakespeare", "fineweb_small", "fineweb", "fineweb_large"],
                         help="Dataset to use")
-    parser.add_argument("--steps", type=int, default=20000,
+    parser.add_argument("--steps", type=int, default=2000,#0,
                         help="Training steps per experiment")
     parser.add_argument("--parallel", action="store_true",
                         help="Use DataParallel for multi-GPU")
