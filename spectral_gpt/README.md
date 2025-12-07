@@ -119,7 +119,10 @@ python wave_experiments.py --experiment all --steps 20000
 
 # Individual experiments
 python wave_experiments.py --experiment full_physics  # RGD + QFE (Recommended)
-python wave_experiments.py --experiment pure_wave     # No Softmax (Experimental) 🌊
+python wave_experiments.py --experiment pure_wave     # ELU+1 Kernel (Default) 🌊
+python wave_experiments.py --experiment pure_wave_linear # Linear Attention O(N) ⚡️
+python wave_experiments.py --experiment pure_wave_sigmoid # Sigmoid Kernel 🌊
+python wave_experiments.py --experiment pure_wave_exp     # Exp Kernel 🌊
 python wave_experiments.py --experiment rgd_only      # RGD only  
 python wave_experiments.py --experiment qfe_only      # QFE only
 python wave_experiments.py --experiment baseline      # No physics

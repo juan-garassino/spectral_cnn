@@ -57,11 +57,16 @@ class ExperimentConfig:
     use_rgd: bool = False
     use_qfe: bool = False
     pure_wave_attention: bool = False  # New flag for pure attention
+    pure_wave_kernel: str = "elu_plus_one" # Kernel: 'elu_plus_one', 'sigmoid', 'exp'
+    pure_wave_mode: str = "quadratic"      # 'quadratic' vs 'linear'
     rgd_strength: float = 0.3
-    rgd_warmup: int = 500
     qfe_lambda: float = 0.05
     qfe_threshold: float = 0.01
     lr: float = 6e-4
+    weight_decay: float = 0.01
+    dropout: float = 0.2 # Increased to 0.2 to combat overfitting
+    warmup_steps: int = 500
+    patience: int = 10   # Early stopping patience (checks every 500 steps)
     steps: int = 2000#0
     wave_ratio_schedule: bool = True  # Schedule wave_ratio from 0.5 to 0.9
 
@@ -72,9 +77,29 @@ ABLATION_EXPERIMENTS = {
         use_rgd=True, use_qfe=True
     ),
     "pure_wave": ExperimentConfig(
-        name="Pure Wave (No Softmax) 🌊",
+        name="Pure Wave (ELU+1) 🌊",
         use_rgd=True, use_qfe=True,
-        pure_wave_attention=True
+        pure_wave_attention=True,
+        pure_wave_kernel="elu_plus_one"
+    ),
+    "pure_wave_linear": ExperimentConfig(
+        name="Pure Wave (Linear O(N)) ⚡️",
+        use_rgd=True, use_qfe=True,
+        pure_wave_attention=True,
+        pure_wave_kernel="elu_plus_one",
+        pure_wave_mode="linear"
+    ),
+    "pure_wave_sigmoid": ExperimentConfig(
+        name="Pure Wave (Sigmoid) 🌊",
+        use_rgd=True, use_qfe=True,
+        pure_wave_attention=True,
+        pure_wave_kernel="sigmoid"
+    ),
+    "pure_wave_exp": ExperimentConfig(
+        name="Pure Wave (Exp) 🌊",
+        use_rgd=True, use_qfe=True,
+        pure_wave_attention=True,
+        pure_wave_kernel="exp"
     ),
     "rgd_only": ExperimentConfig(
         name="RGD Only",
@@ -234,17 +259,18 @@ def train_experiment(
     console.print(f"🔄 Steps: {exp_config.steps}")
     
     # Setup optimizer
+    # Setup optimizer
     if exp_config.use_rgd:
         optimizer = ResonantGradientDescent(
             model.parameters(),
             lr=exp_config.lr,
             resonance_strength=exp_config.rgd_strength,
-            warmup_steps=exp_config.rgd_warmup,
-            weight_decay=0.01
+            warmup_steps=exp_config.warmup_steps,
+            weight_decay=exp_config.weight_decay
         )
         console.print(f"⚡ Optimizer: RGD (strength={exp_config.rgd_strength})")
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=exp_config.lr, weight_decay=0.01)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=exp_config.lr, weight_decay=exp_config.weight_decay)
         console.print(f"⚙️  Optimizer: AdamW")
     
     # Setup loss
@@ -261,11 +287,10 @@ def train_experiment(
     console.print(f"📈 LR: {exp_config.lr:.0e}")
     
     # LR schedule
-    warmup_steps = 300
     def get_lr(step):
-        if step < warmup_steps:
-            return exp_config.lr * step / warmup_steps
-        progress = (step - warmup_steps) / (exp_config.steps - warmup_steps)
+        if step < exp_config.warmup_steps:
+            return exp_config.lr * step / exp_config.warmup_steps
+        progress = (step - exp_config.warmup_steps) / (exp_config.steps - exp_config.warmup_steps)
         return exp_config.lr * 0.5 * (1 + math.cos(math.pi * progress))
     
     # Wave ratio schedule (push toward pure wave)
@@ -280,6 +305,11 @@ def train_experiment(
     losses = []
     coherence_losses = []
     wave_ratios = []
+    
+    # Early stopping tracking
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
     
     start_time = time.perf_counter()
     total_tokens = 0
@@ -347,8 +377,13 @@ def train_experiment(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             
-            losses.append(loss.item())
-            progress.update(task, advance=1, loss=loss.item())
+            # Ensure ce_loss is scalar for logging
+            ce_loss_scalar = ce_loss
+            if ce_loss_scalar.ndim > 0:
+                ce_loss_scalar = ce_loss_scalar.mean()
+            
+            losses.append(ce_loss_scalar.item())
+            progress.update(task, advance=1, loss=ce_loss_scalar.item())
             
             # Log every 500 steps
             if (step + 1) % 500 == 0:
@@ -365,10 +400,31 @@ def train_experiment(
                         val_loss_check = val_loss_check.mean()
                 model.train()
                 
-                console.print(f"Step {step+1:5d} | Train: {loss.item():.4f} | Val: {val_loss_check.item():.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
-    
+                current_val_loss = val_loss_check.item()
+                
+                # Early stopping check
+                if current_val_loss < best_val_loss:
+                    best_val_loss = current_val_loss
+                    patience_counter = 0
+                    # Save best model logic (keep on CPU to save GPU mem)
+                    best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                else:
+                    patience_counter += 1
+                
+                # Log CE loss explicitly
+                console.print(f"Step {step+1:5d} | Train(CE): {ce_loss_scalar.item():.4f} | Val: {current_val_loss:.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
+                
+                if patience_counter >= exp_config.patience:
+                    console.print(f"[yellow]🛑 Early stopping triggered. Best Val: {best_val_loss:.4f}[/yellow]")
+                    break
+
     elapsed = time.perf_counter() - start_time
     speed = total_tokens / elapsed
+    
+    # Restore best model if available
+    if best_model_state is not None:
+        console.print(f"♻️  Restoring best model (Val: {best_val_loss:.4f})")
+        model.load_state_dict(best_model_state)
     
     # Final eval
     model.eval()
@@ -466,8 +522,10 @@ def run_ablation_suite(
             num_waves=model_config.num_waves,
             num_harmonics=model_config.num_harmonics,
             block_size=model_config.block_size,
-            dropout=0.1,
-            pure_wave_attention=getattr(exp_config, 'pure_wave_attention', False)
+            dropout=exp_config.dropout,
+            pure_wave_attention=getattr(exp_config, 'pure_wave_attention', False),
+            pure_wave_kernel=getattr(exp_config, 'pure_wave_kernel', 'elu_plus_one'),
+            pure_wave_mode=getattr(exp_config, 'pure_wave_mode', 'quadratic')
         )
         model = WaveGPT(wave_config).to(device)
         

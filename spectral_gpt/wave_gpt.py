@@ -28,6 +28,8 @@ class WaveGPTConfig:
     block_size: int = 256  # Context length
     dropout: float = 0.1
     pure_wave_attention: bool = False  # True = NO SOFTMAX, pure interference
+    pure_wave_kernel: str = "elu_plus_one" # Kernel for pure wave: 'elu_plus_one', 'sigmoid', 'exp'
+    pure_wave_mode: str = "quadratic"      # 'quadratic' (N^2, exact kernel) or 'linear' (N, decomposable)
 
 
 # ==========================================
@@ -244,12 +246,14 @@ class PureWaveAttention(nn.Module):
     2. No Q/K dot product: uses phase-based interference
     3. Bounded naturally: cosine similarity is in [-1, 1]
     """
-    def __init__(self, d_model, num_heads, num_waves=16, dropout=0.1):
+    def __init__(self, d_model, num_heads, num_waves=16, dropout=0.1, kernel='elu_plus_one', mode='quadratic'):
         super().__init__()
         self.num_heads = num_heads
         self.d_model = d_model
         self.head_dim = d_model // num_heads
         self.num_waves = num_waves
+        self.kernel = kernel
+        self.mode = mode
         
         # Wave projections - map to frequency/phase space
         self.q_freq = nn.Linear(d_model, num_heads * num_waves)
@@ -269,71 +273,104 @@ class PureWaveAttention(nn.Module):
     def forward(self, x):
         """
         Pure wave interference attention.
-        
-        Returns attention based on phase alignment, not learned similarity.
         """
         B, T, C = x.shape
         
-        # Project to wave parameters (frequency and phase)
-        q_f = self.q_freq(x).view(B, T, self.num_heads, self.num_waves)   # (B, T, H, W)
-        k_f = self.k_freq(x).view(B, T, self.num_heads, self.num_waves)   # (B, T, H, W)
-        q_p = self.q_phase(x).view(B, T, self.num_heads, self.num_waves)  # (B, T, H, W)
-        k_p = self.k_phase(x).view(B, T, self.num_heads, self.num_waves)  # (B, T, H, W)
+        # Project to wave parameters
+        q_f = self.q_freq(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        k_f = self.k_freq(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        q_p = self.q_phase(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        k_p = self.k_phase(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # Value projection
-        v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim)      # (B, T, H, D)
-        
-        # Transpose: (B, H, T, ...)
-        q_f = q_f.transpose(1, 2)  # (B, H, T, W)
-        k_f = k_f.transpose(1, 2)  # (B, H, T, W)
-        q_p = q_p.transpose(1, 2)  # (B, H, T, W)
-        k_p = k_p.transpose(1, 2)  # (B, H, T, W)
-        v = v.transpose(1, 2)      # (B, H, T, D)
-        
-        # Compute wave at each position
-        # Wave: A * sin(f * t + phase) where t is position index
+        # Compute wave components
         t_pos = torch.arange(T, device=x.device).float().view(1, 1, T, 1)
+        q_waves = torch.sin(q_f * t_pos + q_p)
+        k_waves = torch.sin(k_f * t_pos + k_p)
         
-        # Query waves: sin(q_freq * pos + q_phase)
-        q_waves = torch.sin(q_f * t_pos + q_p)  # (B, H, T, W)
-        
-        # Key waves: sin(k_freq * pos + k_phase)  
-        k_waves = torch.sin(k_f * t_pos + k_p)  # (B, H, T, W)
-        
-        # PURE WAVE INTERFERENCE: cosine of phase difference
-        # When waves are in phase: high positive interference
-        # When waves are out of phase: negative interference (SUPPRESSION!)
-        
-        # Normalize across wave dimension for bounded output
+        # Normalize
         q_norm = F.normalize(q_waves, dim=-1)
         k_norm = F.normalize(k_waves, dim=-1)
         
-        # Interference = dot product of normalized waves = cosine similarity
-        # Range: [-1, 1]
-        # Variance of dot product of normalized vectors is 1/dim.
-        # We multiply by sqrt(dim) to restore unit variance.
-        interference = torch.matmul(q_norm, k_norm.transpose(-2, -1)) * (self.num_waves ** 0.5)
+        # Scale q/k to have variance 1 before kernel
+        # interference = q @ k * sqrt(W). Equivalent to q*W^0.25 @ k*W^0.25? 
+        # For linear mode, we need to distribute the scaling.
+        scale_factor = (self.num_waves ** 0.25)
+        q_norm = q_norm * scale_factor
+        k_norm = k_norm * scale_factor
         
-        # Scale per head (learnable)
-        interference = interference * self.interference_scale
-        
-        # Causal masking: future positions get ZERO (not -inf!)
-        # This is different from softmax-based attention
-        causal_mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
-        interference = interference.masked_fill(causal_mask, 0.0)
-        
-        # NO SOFTMAX! Pure interference weights
-        # Normalize by number of attended positions for stability
-        num_attended = torch.arange(1, T + 1, device=x.device).float().view(1, 1, T, 1)
-        attn = interference / num_attended.sqrt()  # Scale by sqrt(n) like standard attention
-        
-        # Dropout on attention (optional)
-        attn = self.dropout(attn)
-        
-        # Apply to values - negative attention = SUPPRESSION
-        out = torch.matmul(attn, v)  # (B, H, T, D)
-        
-        # Reshape and project
+        if self.mode == 'linear':
+            # === Linear Attention: O(N) ===
+            # Decompose kernel: phi(Q) @ phi(K)^T
+            
+            # 1. Apply kernel to Q and K directly
+            if self.kernel == 'elu_plus_one':
+                q_prime = F.elu(q_norm) + 1.0
+                k_prime = F.elu(k_norm) + 1.0
+            elif self.kernel == 'sigmoid':
+                q_prime = torch.sigmoid(q_norm)
+                k_prime = torch.sigmoid(k_norm)
+            elif self.kernel == 'exp':
+                q_prime = torch.exp(q_norm)
+                k_prime = torch.exp(k_norm)
+            else: # identity (not recommended for linear mode as cumsum will drift)
+                q_prime = F.elu(q_norm) + 1.0
+                k_prime = F.elu(k_norm) + 1.0
+            
+            # 2. Compute KV state = cumsum(K' * V)
+            # Result: (B, H, T, W, D)
+            kv = torch.einsum('bhtw, bhtd -> bhtwd', k_prime, v)
+            S = torch.cumsum(kv, dim=2)
+            
+            # 3. Compute Z state (normalization denominator)
+            # Result: (B, H, T, W)
+            Z = torch.cumsum(k_prime, dim=2)
+            
+            # 4. Numerator = Q' . S (sum over W)
+            numerator = torch.einsum('bhtw, bhtwd -> bhtd', q_prime, S)
+            
+            # 5. Denominator = Q' . Z (sum over W)
+            denominator = torch.einsum('bhtw, bhtw -> bht', q_prime, Z)
+            denominator = denominator.unsqueeze(-1)
+            
+            out = numerator / (denominator + 1e-6)
+            
+        else:
+            # === Quadratic Attention: O(N^2) ===
+            # Explicit interference matrix calculation
+            
+            # Interference = (q @ k) 
+            # Note: q_norm, k_norm already scaled by W^0.25. Product is scaled by W^0.5.
+            interference = torch.matmul(q_norm, k_norm.transpose(-2, -1))
+            
+            # Scale per head (learnable)
+            interference = interference * self.interference_scale
+            
+            # Masking
+            causal_mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
+            
+            # Activation
+            if self.kernel == 'elu_plus_one':
+                interference = interference.masked_fill(causal_mask, -float('inf'))
+                attn = F.elu(interference) + 1.0
+            elif self.kernel == 'sigmoid':
+                interference = interference.masked_fill(causal_mask, -float('inf'))
+                attn = torch.sigmoid(interference)
+            elif self.kernel == 'exp':
+                interference = interference.masked_fill(causal_mask, -float('inf'))
+                attn = torch.exp(interference)
+            else:
+                interference = interference.masked_fill(causal_mask, 0.0)
+                attn = interference
+            
+            # Normalize by number of attended positions (approx Z)
+            num_attended = torch.arange(1, T + 1, device=x.device).float().view(1, 1, T, 1)
+            attn = attn / num_attended.sqrt()
+            
+            attn = self.dropout(attn)
+            out = torch.matmul(attn, v)
+
+        # Output projection
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         out = self.o_proj(out)
         
@@ -384,7 +421,8 @@ class WaveBlock(nn.Module):
             # PURE wave attention - NO SOFTMAX!
             self.attn = PureWaveAttention(
                 config.d_model, config.num_heads, 
-                config.num_waves, config.dropout
+                config.num_waves, config.dropout,
+                kernel=getattr(config, 'pure_wave_kernel', 'elu_plus_one')
             )
         else:
             # Hybrid wave attention (with softmax)
