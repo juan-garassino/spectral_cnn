@@ -26,6 +26,8 @@ import math
 import argparse
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, List, Tuple
+import tiktoken # GPT-2 Tokenizer
+from datasets import load_dataset # HuggingFace Datasets
 
 import torch
 import torch.nn as nn
@@ -102,7 +104,7 @@ class ExperimentConfig:
     qfe_threshold: float = 0.01
     lr: float = 6e-4
     weight_decay: float = 0.01
-    dropout: float = 0.2 
+    dropout: float = 0.1 # Default 0.1 for Baseline
     warmup_steps: int = 500
     patience: int = 8   # Scientific default
     steps: int = 5000   # Scientific default (standard epoch)
@@ -114,14 +116,14 @@ ABLATION_EXPERIMENTS = {
     "baseline": ExperimentConfig(
         name="Baseline (AdamW + CE)",
         use_rgd=False, use_qfe=False,
-        lr=6e-4, dropout=0.2  # Standard NanoGPT settings
+        lr=6e-4, dropout=0.1  # Standard NanoGPT settings (0.1)
     ),
     
     # 2. RGD Only (Aggressive Test)
     "rgd_only": ExperimentConfig(
         name="RGD Only",
         use_rgd=True, use_qfe=False,
-        lr=1e-3, dropout=0.2
+        lr=1e-3, dropout=0.1
     ),
     
     # 3. Full Physics (RGD + QFE + Aggressive)
@@ -136,21 +138,21 @@ ABLATION_EXPERIMENTS = {
     "qfe_only": ExperimentConfig(
         name="QFE Only", 
         use_rgd=False, use_qfe=True,
-        lr=6e-4, dropout=0.2
+        lr=6e-4, dropout=0.1
     ),
 
     # 5. Pure Wave Variants (Inherit Physics Settings: RGD=True)
     "pure_wave": ExperimentConfig(
         name="Pure Wave (ELU+1) 🌊",
         use_rgd=True, use_qfe=True,
-        lr=1e-3, dropout=0.2,
+        lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
         pure_wave_kernel="elu_plus_one"
     ),
     "pure_wave_linear": ExperimentConfig(
         name="Pure Wave (Linear O(N)) ⚡️",
         use_rgd=True, use_qfe=True,
-        lr=1e-3, dropout=0.2,
+        lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
         pure_wave_kernel="elu_plus_one",
         pure_wave_mode="linear"
@@ -158,14 +160,14 @@ ABLATION_EXPERIMENTS = {
     "pure_wave_sigmoid": ExperimentConfig(
         name="Pure Wave (Sigmoid) 🌊",
         use_rgd=True, use_qfe=True,
-        lr=1e-3, dropout=0.2,
+        lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
         pure_wave_kernel="sigmoid"
     ),
     "pure_wave_exp": ExperimentConfig(
         name="Pure Wave (Exp) 🌊",
         use_rgd=True, use_qfe=True,
-        lr=1e-3, dropout=0.2,
+        lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
         pure_wave_kernel="exp"
     ),
@@ -188,22 +190,22 @@ class ModelConfig:
 
 MODEL_CONFIGS = {
     "small": ModelConfig(
-        name="Small (Shakespeare)",
+        name="Small (GPT-2 Compatible)",
         d_model=384, num_layers=8, num_heads=8,
         num_waves=48, num_harmonics=4,
-        vocab_size=1024, block_size=256, batch_size=32
+        vocab_size=50257, block_size=256, batch_size=32 # Tiktoken Vocab
     ),
     "medium": ModelConfig(
         name="Medium",
         d_model=512, num_layers=10, num_heads=8,
         num_waves=64, num_harmonics=4,
-        vocab_size=8192, block_size=384, batch_size=24
+        vocab_size=50257, block_size=384, batch_size=24
     ),
     "large": ModelConfig(
-        name="Large (FineWeb-Edu)",
+        name="Large",
         d_model=768, num_layers=12, num_heads=12,
         num_waves=96, num_harmonics=4,
-        vocab_size=32000, block_size=512, batch_size=16
+        vocab_size=50257, block_size=512, batch_size=16
     ),
 }
 
@@ -212,41 +214,14 @@ MODEL_CONFIGS = {
 # Dataset Loaders
 # ==========================================
 
-def load_shakespeare(console):
-    """Load Shakespeare dataset"""
-    data_path = os.path.join(current_dir, "data", "tiny_shakespeare.txt")
-    
-    if not os.path.exists(data_path):
-        import urllib.request
-        os.makedirs(os.path.dirname(data_path), exist_ok=True)
-        console.print("📥 Downloading Shakespeare...")
-        urllib.request.urlretrieve(
-            "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-            data_path
-        )
-    
-    with open(data_path, 'r') as f:
-        text = f.read()
-    
-    return text
-
-
-def load_fineweb(console, subset="sample-10BT", max_tokens=10_000_000):
+def load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=100_000_000):
     """
-    Load FineWeb-Edu dataset from HuggingFace.
-    
-    Args:
-        subset: "sample-10BT" (10B tokens) or "sample-100BT" (100B tokens)
-        max_tokens: Maximum tokens to load for memory efficiency
+    Load FineWeb-Edu and tokenize with Tiktoken until exactly target_tokens.
     """
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        console.print("[red]Please install datasets: pip install datasets[/red]")
-        return None
+    console.print(f"📥 Loading FineWeb-Edu ({subset}) via Tiktoken...")
+    console.print(f"   Target: {target_tokens:,} tokens")
     
-    console.print(f"📥 Loading FineWeb-Edu ({subset})...")
-    console.print(f"   Max tokens: {max_tokens:,}")
+    enc = tiktoken.get_encoding("gpt2")
     
     # Stream the dataset
     ds = load_dataset(
@@ -256,39 +231,43 @@ def load_fineweb(console, subset="sample-10BT", max_tokens=10_000_000):
         streaming=True
     )
     
-    # Collect text up to max_tokens
-    texts = []
-    total_chars = 0
-    target_chars = max_tokens * 4  # ~4 chars per token estimate
+    all_tokens = []
+    total_count = 0
     
     with Progress(console=console) as progress:
-        task = progress.add_task("Loading FineWeb...", total=target_chars)
+        task = progress.add_task("Streaming & Tokenizing...", total=target_tokens)
         
         for item in ds:
             text = item.get("text", "")
-            texts.append(text)
-            total_chars += len(text)
-            progress.update(task, completed=min(total_chars, target_chars))
+            if not text: continue
             
-            if total_chars >= target_chars:
+            # Tokenize
+            tokens = enc.encode(text)
+            all_tokens.extend(tokens)
+            total_count += len(tokens)
+            
+            progress.update(task, completed=min(total_count, target_tokens))
+            
+            if total_count >= target_tokens:
                 break
+                
+    # Trim to exact target
+    all_tokens = all_tokens[:target_tokens]
+    console.print(f"✅ Loaded exactly {len(all_tokens):,} tokens.")
     
-    full_text = "\n\n".join(texts)
-    console.print(f"   Loaded {len(full_text):,} characters")
-    
-    return full_text
+    # Convert to tensor
+    data = torch.tensor(all_tokens, dtype=torch.long)
+    return data
 
 
-def get_dataset(dataset_name: str, console, max_tokens: int = 10_000_000):
+def get_dataset(dataset_name: str, console, max_tokens: int = 100_000_000):
     """Get dataset by name"""
     if dataset_name == "shakespeare":
-        return load_shakespeare(console)
-    elif dataset_name == "fineweb_small":
-        return load_fineweb(console, subset="sample-10BT", max_tokens=1_000_000)
-    elif dataset_name == "fineweb":
-        return load_fineweb(console, subset="sample-10BT", max_tokens=max_tokens)
-    elif dataset_name == "fineweb_large":
-        return load_fineweb(console, subset="sample-100BT", max_tokens=max_tokens)
+        # Fallback to shakespeare if explicit
+        return load_shakespeare(console) # Returns text, not tensor
+    elif dataset_name == "fineweb" or dataset_name == "fineweb_small":
+        # Use tiktoken loader
+        return load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=max_tokens)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -546,26 +525,28 @@ def run_ablation_suite(
         border_style="magenta"
     ))
     
-    # Load data
-    text = get_dataset(dataset, console)
-    if text is None:
-        return {}
+    # Load data (Directly returns tensor if tiktoken, text if shakespeare)
+    data_or_text = get_dataset(dataset, console)
     
-    # Train tokenizer or load
-    tokenizer_path = os.path.join(current_dir, "benchmark_results", "tokenizer.json")
-    if dataset == "shakespeare" and os.path.exists(tokenizer_path):
-        console.print("♻️  Loading existing tokenizer...")
-        tokenizer = BasicTokenizer()
-        with open(tokenizer_path, 'r') as f:
-            data = json.load(f)
-            tokenizer.vocab = {int(k): bytes(v) for k, v in data['vocab'].items()}
+    if isinstance(data_or_text, torch.Tensor):
+        # Already tokenized (FineWeb/Tiktoken)
+        data = data_or_text
+        enc = tiktoken.get_encoding("gpt2") # For decoding later
+        tokenizer = enc # Alias for generation
     else:
-        console.print(f"🔧 Training tokenizer (vocab={model_config.vocab_size})...")
+        # Shakespeare (Text) -> Legacy BasicTokenizer
+        text = data_or_text
+        tokenizer_path = os.path.join(current_dir, "benchmark_results", "tokenizer.json")
+        console.print("♻️  Using BasicTokenizer for Shakespeare...")
         tokenizer = BasicTokenizer()
-        tokenizer.train(text, model_config.vocab_size)
-    
-    # Encode data
-    data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
+        if os.path.exists(tokenizer_path):
+             with open(tokenizer_path, 'r') as f:
+                data_json = json.load(f)
+                tokenizer.vocab = {int(k): bytes(v) for k, v in data_json['vocab'].items()}
+        else:
+             tokenizer.train(text, model_config.vocab_size)
+        data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
+        
     n = int(0.9 * len(data)) # Strict 90/10 split
     train_data = data[:n]
     val_data = data[n:]
@@ -607,13 +588,26 @@ def run_ablation_suite(
         
         # GENERATION CHECK (Scientific Visual Verification)
         console.print("[bold]📝 Generation Check:[/bold]")
-        start_text = "The King" if "shakespeare" in dataset.lower() else "The universe"
-        context_ids = tokenizer.encode(start_text)
+        start_text = "The theory of quantum mechanics suggests" # Scientific Prompt
+        
+        # Handle tokenizer differences (tiktoken vs basic)
+        if hasattr(tokenizer, 'encode'):
+             context_ids = tokenizer.encode(start_text)
+        else:
+             context_ids = tokenizer.encode(start_text)
+             
         context_tensor = torch.tensor([context_ids], dtype=torch.long, device=device)
         
         # Generate
         gen_ids = model.generate(context_tensor, max_new_tokens=100, temperature=0.8)
-        gen_text = tokenizer.decode(gen_ids[0].tolist())
+        
+        # Decode
+        if hasattr(tokenizer, 'decode'):
+            gen_text = tokenizer.decode(gen_ids[0].tolist())
+        else:
+            # Fallback for BasicTokenizer
+            gen_text = tokenizer.decode(gen_ids[0].tolist())
+            
         console.print(Panel(gen_text, title=f"{exp_config.name} Output", border_style="green"))
         
         result['generation'] = gen_text
@@ -742,7 +736,7 @@ def main():
     parser.add_argument("--model", type=str, default="small",
                         choices=list(MODEL_CONFIGS.keys()),
                         help="Model size")
-    parser.add_argument("--dataset", type=str, default="shakespeare",
+    parser.add_argument("--dataset", type=str, default="fineweb",
                         choices=["shakespeare", "fineweb_small", "fineweb", "fineweb_large"],
                         help="Dataset to use")
     parser.add_argument("--steps", type=int, default=5000,
