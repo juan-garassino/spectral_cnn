@@ -236,12 +236,15 @@ class QuantumFieldEntanglementLoss(nn.Module):
         self,
         lambda_coherence: float = 0.05,
         amplitude_threshold: float = 0.01,
-        temperature: float = 1.0
+        temperature: float = 1.0,
+        projection_dim: int = 256
     ):
         super().__init__()
         self.lambda_coherence = lambda_coherence
         self.amplitude_threshold = amplitude_threshold
         self.temperature = temperature
+        self.projection_dim = projection_dim
+        self.register_buffer('proj_matrix', None) # Lazy init
         
     def compute_spectral_coherence(
         self, 
@@ -263,12 +266,31 @@ class QuantumFieldEntanglementLoss(nn.Module):
         # Convert output to probabilities
         probs = F.softmax(output / self.temperature, dim=-1)  # (B, T, V)
         
-        # Convert target to one-hot
         target_onehot = F.one_hot(target, num_classes=V).float()  # (B, T, V)
         
+        # --- Projected Spectral Coherence (Memory Optimization) ---
+        # If vocab V is large (e.g. 50k), FFT is OOM. Project to d < V first.
+        if V > self.projection_dim:
+            # Lazy init projection matrix
+            if self.proj_matrix is None or self.proj_matrix.shape != (V, self.projection_dim):
+                # Fixed random projection (Johnson-Lindenstrauss lemma preservation)
+                self.proj_matrix = torch.randn(V, self.projection_dim, device=output.device) / (self.projection_dim ** 0.5)
+            
+            # Project probabilities and targets
+            # (B, T, V) @ (V, d) -> (B, T, d)
+            probs_proj = probs @ self.proj_matrix
+            target_proj = target_onehot @ self.proj_matrix
+            
+            # Use projected signals for FFT
+            signal_out = probs_proj
+            signal_target = target_proj
+        else:
+            signal_out = probs
+            signal_target = target_onehot
+            
         # Compute FFT along sequence dimension (T)
-        output_fft = fft.rfft(probs, dim=1)  # (B, T//2+1, V)
-        target_fft = fft.rfft(target_onehot, dim=1)  # (B, T//2+1, V)
+        output_fft = fft.rfft(signal_out, dim=1)  # (B, T//2+1, d)
+        target_fft = fft.rfft(signal_target, dim=1)  # (B, T//2+1, d)
         
         # Extract amplitude and phase
         A_out = torch.abs(output_fft)
@@ -389,7 +411,8 @@ def create_physics_optimizer(
 def create_physics_loss(
     use_qfe: bool = True,
     lambda_coherence: float = 0.05,
-    amplitude_threshold: float = 0.01
+    amplitude_threshold: float = 0.01,
+    projection_dim: int = 256
 ) -> nn.Module:
     """
     Create loss function with optional QFE coherence term.
@@ -398,6 +421,7 @@ def create_physics_loss(
         use_qfe: Whether to use QFE loss (True) or standard CE (False)
         lambda_coherence: Weight for coherence term
         amplitude_threshold: Minimum amplitude for phase computation
+        projection_dim: Dimension to project logits to before FFT
         
     Returns:
         Loss function (callable)
@@ -405,7 +429,8 @@ def create_physics_loss(
     if use_qfe:
         return QuantumFieldEntanglementLoss(
             lambda_coherence=lambda_coherence,
-            amplitude_threshold=amplitude_threshold
+            amplitude_threshold=amplitude_threshold,
+            projection_dim=projection_dim
         )
     else:
         # Return a simple wrapper for CE loss
