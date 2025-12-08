@@ -41,6 +41,7 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeEl
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(current_dir, 'prototyping'))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir)) # Add root project dir for src imports
 
 from wave_gpt import WaveGPT, WaveGPTConfig
 from physics_optim import ResonantGradientDescent, QuantumFieldEntanglementLoss
@@ -49,6 +50,43 @@ from train import BasicTokenizer, get_batch
 # ==========================================
 # Experiment Configurations
 # ==========================================
+
+class EarlyStopping:
+    """
+    Robust Early Stopping with CPU state saving.
+    """
+    def __init__(self, patience: int = 8, min_delta: float = 0.005, console=None):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.console = console
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+        self.best_model_state = None
+        
+    def __call__(self, val_loss: float, model: nn.Module) -> bool:
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            # Save state to CPU to avoid GPU OOM
+            self.best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if self.console:
+                self.console.print(f"   [green]New best: {val_loss:.4f} (Saved)[/green]")
+        else:
+            self.counter += 1
+            if self.console:
+                self.console.print(f"   [yellow]Patience: {self.counter}/{self.patience}[/yellow]")
+            if self.counter >= self.patience:
+                self.early_stop = True
+                
+        return self.early_stop
+        
+    def restore(self, model: nn.Module):
+        if self.best_model_state is not None:
+            if self.console:
+                self.console.print(f"♻️  Restoring best model (Val: {self.best_loss:.4f})")
+            model.load_state_dict(self.best_model_state)
+
 
 @dataclass
 class ExperimentConfig:
@@ -64,27 +102,55 @@ class ExperimentConfig:
     qfe_threshold: float = 0.01
     lr: float = 6e-4
     weight_decay: float = 0.01
-    dropout: float = 0.2 # Increased to 0.2 to combat overfitting
+    dropout: float = 0.2 
     warmup_steps: int = 500
-    patience: int = 10   # Early stopping patience (checks every 500 steps)
-    steps: int = 2000#0
+    patience: int = 8   # Scientific default
+    steps: int = 5000   # Scientific default (standard epoch)
     wave_ratio_schedule: bool = True  # Schedule wave_ratio from 0.5 to 0.9
 
 
 ABLATION_EXPERIMENTS = {
+    # 1. Baseline (Control)
+    "baseline": ExperimentConfig(
+        name="Baseline (AdamW + CE)",
+        use_rgd=False, use_qfe=False,
+        lr=6e-4, dropout=0.2  # Standard NanoGPT settings
+    ),
+    
+    # 2. RGD Only (Aggressive Test)
+    "rgd_only": ExperimentConfig(
+        name="RGD Only",
+        use_rgd=True, use_qfe=False,
+        lr=1e-3, dropout=0.2
+    ),
+    
+    # 3. Full Physics (RGD + QFE + Aggressive)
     "full_physics": ExperimentConfig(
         name="Full Physics (RGD + QFE)",
-        use_rgd=True, use_qfe=True
+        use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.0, # NO DROPOUT - rely on QFE
+        qfe_lambda=0.1        # Stronger QFE
     ),
+    
+    # 4. QFE Only
+    "qfe_only": ExperimentConfig(
+        name="QFE Only", 
+        use_rgd=False, use_qfe=True,
+        lr=6e-4, dropout=0.2
+    ),
+
+    # 5. Pure Wave Variants (Inherit Physics Settings: RGD=True)
     "pure_wave": ExperimentConfig(
         name="Pure Wave (ELU+1) 🌊",
         use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.2,
         pure_wave_attention=True,
         pure_wave_kernel="elu_plus_one"
     ),
     "pure_wave_linear": ExperimentConfig(
         name="Pure Wave (Linear O(N)) ⚡️",
         use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.2,
         pure_wave_attention=True,
         pure_wave_kernel="elu_plus_one",
         pure_wave_mode="linear"
@@ -92,26 +158,16 @@ ABLATION_EXPERIMENTS = {
     "pure_wave_sigmoid": ExperimentConfig(
         name="Pure Wave (Sigmoid) 🌊",
         use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.2,
         pure_wave_attention=True,
         pure_wave_kernel="sigmoid"
     ),
     "pure_wave_exp": ExperimentConfig(
         name="Pure Wave (Exp) 🌊",
         use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.2,
         pure_wave_attention=True,
         pure_wave_kernel="exp"
-    ),
-    "rgd_only": ExperimentConfig(
-        name="RGD Only",
-        use_rgd=True, use_qfe=False
-    ),
-    "qfe_only": ExperimentConfig(
-        name="QFE Only", 
-        use_rgd=False, use_qfe=True
-    ),
-    "baseline": ExperimentConfig(
-        name="Baseline (AdamW + CE)",
-        use_rgd=False, use_qfe=False
     ),
 }
 
@@ -307,9 +363,11 @@ def train_experiment(
     wave_ratios = []
     
     # Early stopping tracking
-    best_val_loss = float('inf')
-    patience_counter = 0
-    best_model_state = None
+    early_stopping = EarlyStopping(
+        patience=exp_config.patience,
+        min_delta=0.005,
+        console=console
+    )
     
     start_time = time.perf_counter()
     total_tokens = 0
@@ -385,56 +443,63 @@ def train_experiment(
             losses.append(ce_loss_scalar.item())
             progress.update(task, advance=1, loss=ce_loss_scalar.item())
             
-            # Log every 500 steps
-            if (step + 1) % 500 == 0:
-                avg = sum(losses[-500:]) / len(losses[-500:])
+            # Check every 250 steps for scientific rigor
+            if (step + 1) % 250 == 0:
+                avg = sum(losses[-250:]) / len(losses[-250:])
                 wave_r = wave_ratios[-1] if wave_ratios else 0.5
                 
                 # Fast validation check
                 model.eval()
+                val_losses_accum = []
+                num_val_batches = 20 # Robust multi-batch validation
                 with torch.no_grad():
-                    # Check on a small batch of validation data
-                    val_x, val_y = get_batch(val_data, model_config.batch_size, model_config.block_size, device) 
-                    _, val_loss_check = model(val_x, val_y)
-                    if val_loss_check.ndim > 0:
-                        val_loss_check = val_loss_check.mean()
+                    for _ in range(num_val_batches):
+                        val_x, val_y = get_batch(val_data, model_config.batch_size, model_config.block_size, device) 
+                        _, val_loss_check = model(val_x, val_y)
+                        if val_loss_check.ndim > 0:
+                            val_loss_check = val_loss_check.mean()
+                        val_losses_accum.append(val_loss_check.item())
                 model.train()
                 
-                current_val_loss = val_loss_check.item()
-                
-                # Early stopping check
-                if current_val_loss < best_val_loss:
-                    best_val_loss = current_val_loss
-                    patience_counter = 0
-                    # Save best model logic (keep on CPU to save GPU mem)
-                    best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                else:
-                    patience_counter += 1
+                current_val_loss = sum(val_losses_accum) / len(val_losses_accum)
                 
                 # Log CE loss explicitly
                 console.print(f"Step {step+1:5d} | Train(CE): {ce_loss_scalar.item():.4f} | Val: {current_val_loss:.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
                 
-                if patience_counter >= exp_config.patience:
-                    console.print(f"[yellow]🛑 Early stopping triggered. Best Val: {best_val_loss:.4f}[/yellow]")
+                 # Check Early Stopping
+                if early_stopping(current_val_loss, model):
+                    console.print(f"[yellow]🛑 Early stopping triggered. Best Val: {early_stopping.best_loss:.4f}[/yellow]")
                     break
 
     elapsed = time.perf_counter() - start_time
     speed = total_tokens / elapsed
     
-    # Restore best model if available
-    if best_model_state is not None:
-        console.print(f"♻️  Restoring best model (Val: {best_val_loss:.4f})")
-        model.load_state_dict(best_model_state)
+    # Restore best model
+    early_stopping.restore(model)
     
     # Final eval
     model.eval()
     with torch.no_grad():
         x, y = get_batch(val_data, model_config.batch_size, model_config.block_size, device)
         _, val_loss = model(x, y)
-        
-        # Handle DataParallel output (one loss per dim)
-        if val_loss.ndim > 0:
-            val_loss = val_loss.mean()
+        if val_loss.ndim > 0: val_loss = val_loss.mean()
+            
+    # Generation Check
+    console.print("\n[bold]🎨 Generating sample (Visual Check)...[/bold]")
+    context = "The King" if "shakespeare" in exp_config.name.lower() else "The universe"
+    # Need tokenizer to encode
+    # Assumption: tokenizer is available in closure or we need to pass it. 
+    # Current scope doesn't have tokenizer. 
+    # Use simple ascii encoding for Shakespeare fallback if needed, but we should pass tokenizer or rely on it being loaded globally?
+    # Actually, main() has tokenizer. We can just return 'model' and generate in main, OR generic encode/decode here.
+    # Let's do a simple generation and return the string.
+    
+    # Quick dirty generation without tokenizer ref if needed, but better to skip if no tokenizer.
+    # However, request says "Add generation Check".
+    # I will assume we can generate token IDs and return them, or simply use the model.generate method.
+    # I'll just skip text decoding here and return generated tokens to be decoded later, OR simply omit decoding text and trust the user to inspect tokens if they want.
+    # Wait, the request says "Generate 100 tokens... This allows us to visually verify". Verification implies text.
+    # I will stick to returning the model and letting `run_ablation_suite` handle the printing using the tokenizer it HAS.
     
     return {
         "name": exp_config.name,
@@ -447,7 +512,8 @@ def train_experiment(
         "coherence_losses": coherence_losses,
         "wave_ratios": wave_ratios,
         "params": params,
-        "model": model
+        "model": model, 
+        "early_stopping_best": early_stopping.best_loss
     }
 
 
@@ -500,7 +566,7 @@ def run_ablation_suite(
     
     # Encode data
     data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
-    n = int(0.8 * len(data))
+    n = int(0.9 * len(data)) # Strict 90/10 split
     train_data = data[:n]
     val_data = data[n:]
     console.print(f"📊 Tokens: Train {len(train_data):,} | Val {len(val_data):,}")
@@ -511,7 +577,7 @@ def run_ablation_suite(
         console.print("\n" + "="*60)
         
         exp_config = ABLATION_EXPERIMENTS[exp_name]
-        exp_config.steps = steps  # Override steps
+        exp_config.steps = steps  # Override if needed, but default is now Scientific 5000
         
         # Create model
         wave_config = WaveGPTConfig(
@@ -538,6 +604,19 @@ def run_ablation_suite(
         result = train_experiment(
             model, train_data, val_data, exp_config, model_config, console, device
         )
+        
+        # GENERATION CHECK (Scientific Visual Verification)
+        console.print("[bold]📝 Generation Check:[/bold]")
+        start_text = "The King" if "shakespeare" in dataset.lower() else "The universe"
+        context_ids = tokenizer.encode(start_text)
+        context_tensor = torch.tensor([context_ids], dtype=torch.long, device=device)
+        
+        # Generate
+        gen_ids = model.generate(context_tensor, max_new_tokens=100, temperature=0.8)
+        gen_text = tokenizer.decode(gen_ids[0].tolist())
+        console.print(Panel(gen_text, title=f"{exp_config.name} Output", border_style="green"))
+        
+        result['generation'] = gen_text
         results[exp_name] = result
         
         # Clean up
@@ -666,7 +745,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="shakespeare",
                         choices=["shakespeare", "fineweb_small", "fineweb", "fineweb_large"],
                         help="Dataset to use")
-    parser.add_argument("--steps", type=int, default=15000,#0,
+    parser.add_argument("--steps", type=int, default=5000,
                         help="Training steps per experiment")
     parser.add_argument("--parallel", action="store_true",
                         help="Use DataParallel for multi-GPU")
