@@ -210,7 +210,7 @@ MODEL_CONFIGS = {
         name="Small (GPT-2 Compatible)",
         d_model=384, num_layers=8, num_heads=8,
         num_waves=48, num_harmonics=4,
-        vocab_size=50257, block_size=256, batch_size=32 # Tiktoken Vocab
+        vocab_size=50257, block_size=256, batch_size=16 # Reduced to 16 to fit QFE Loss in Memory
     ),
     "medium": ModelConfig(
         name="Medium",
@@ -242,44 +242,44 @@ def load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=500_000_0
     
     
     # MOCK FOR VERIFICATION
-    console.print("[yellow]⚠️  MOCKING DATA FOR FAST STATS CHECK[/yellow]")
-    return torch.randint(0, 50257, (100000,), dtype=torch.long)
+    # console.print("[yellow]⚠️  MOCKING DATA FOR FAST STATS CHECK[/yellow]")
+    # return torch.randint(0, 50257, (100000,), dtype=torch.long)
     
-    # Stream the dataset (COMMENTED OUT FOR VERIFY)
-    # ds = load_dataset(
-    #    "HuggingFaceFW/fineweb-edu",
-    #    name=subset,
-    #    split="train",
-    #    streaming=True
-    # )
+    # Stream the dataset
+    ds = load_dataset(
+       "HuggingFaceFW/fineweb-edu",
+       name=subset,
+       split="train",
+       streaming=True
+    )
     
-    # all_tokens = []
-    # total_count = 0
+    all_tokens = []
+    total_count = 0
     
-    # with Progress(console=console) as progress:
-    #     task = progress.add_task("Streaming & Tokenizing...", total=target_tokens)
+    with Progress(console=console) as progress:
+        task = progress.add_task("Streaming & Tokenizing...", total=target_tokens)
         
-    #     for item in ds:
-    #         text = item.get("text", "")
-    #         if not text: continue
+        for item in ds:
+            text = item.get("text", "")
+            if not text: continue
             
-    #         # Tokenize
-    #         tokens = enc.encode(text)
-    #         all_tokens.extend(tokens)
-    #         total_count += len(tokens)
+            # Tokenize
+            tokens = enc.encode(text)
+            all_tokens.extend(tokens)
+            total_count += len(tokens)
             
-    #         progress.update(task, completed=min(total_count, target_tokens))
+            progress.update(task, completed=min(total_count, target_tokens))
             
-    #         if total_count >= target_tokens:
-    #             break
+            if total_count >= target_tokens:
+                break
                 
-    # # Trim to exact target
-    # all_tokens = all_tokens[:target_tokens]
-    # console.print(f"✅ Loaded exactly {len(all_tokens):,} tokens.")
+    # Trim to exact target
+    all_tokens = all_tokens[:target_tokens]
+    console.print(f"✅ Loaded exactly {len(all_tokens):,} tokens.")
     
-    # # Convert to tensor
-    # data = torch.tensor(all_tokens, dtype=torch.long)
-    # return data
+    # Convert to tensor
+    data = torch.tensor(all_tokens, dtype=torch.long)
+    return data
 
 
 def get_dataset(dataset_name: str, console, max_tokens: int = 500_000_000):
