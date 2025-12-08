@@ -266,8 +266,6 @@ class QuantumFieldEntanglementLoss(nn.Module):
         # Convert output to probabilities
         probs = F.softmax(output / self.temperature, dim=-1)  # (B, T, V)
         
-        target_onehot = F.one_hot(target, num_classes=V).float()  # (B, T, V)
-        
         # --- Projected Spectral Coherence (Memory Optimization) ---
         # If vocab V is large (e.g. 50k), FFT is OOM. Project to d < V first.
         if V > self.projection_dim:
@@ -276,17 +274,22 @@ class QuantumFieldEntanglementLoss(nn.Module):
                 # Fixed random projection (Johnson-Lindenstrauss lemma preservation)
                 self.proj_matrix = torch.randn(V, self.projection_dim, device=output.device) / (self.projection_dim ** 0.5)
             
-            # Project probabilities and targets
-            # (B, T, V) @ (V, d) -> (B, T, d)
+            # Project probabilities: (B, T, V) @ (V, d) -> (B, T, d)
             probs_proj = probs @ self.proj_matrix
-            target_proj = target_onehot @ self.proj_matrix
+            
+            # Project targets: OneHot @ Matrix == Embedding Lookup (OOM Fix!)
+            # Look up the random vectors directly: (B, T) -> (B, T, d)
+            target_proj = F.embedding(target, self.proj_matrix)
             
             # Use projected signals for FFT
             signal_out = probs_proj
             signal_target = target_proj
         else:
+            # For small vocab, do full calculation
+            target_onehot = F.one_hot(target, num_classes=V).float()  # (B, T, V)
             signal_out = probs
             signal_target = target_onehot
+
             
         # Compute FFT along sequence dimension (T)
         output_fft = fft.rfft(signal_out, dim=1)  # (B, T//2+1, d)
