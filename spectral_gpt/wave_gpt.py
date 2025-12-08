@@ -30,6 +30,87 @@ class WaveGPTConfig:
     pure_wave_attention: bool = False  # True = NO SOFTMAX, pure interference
     pure_wave_kernel: str = "elu_plus_one" # Kernel for pure wave: 'elu_plus_one', 'sigmoid', 'exp'
     pure_wave_mode: str = "quadratic"      # 'quadratic' (N^2, exact kernel) or 'linear' (N, decomposable)
+    model_type: str = "wave"               # "wave" or "standard"
+
+# ==========================================
+# Standard Transformer Components (The Control)
+# ==========================================
+
+class StandardEmbedding(nn.Module):
+    """Standard Token + Positional Embedding"""
+    def __init__(self, vocab_size, d_model, block_size, dropout=0.1):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.position_embedding = nn.Embedding(block_size, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.block_size = block_size
+
+    def forward(self, idx):
+        B, T = idx.shape
+        device = idx.device
+        
+        pos = torch.arange(0, T, dtype=torch.long, device=device).unsqueeze(0) # (1, T)
+        
+        tok_emb = self.token_embedding(idx) # (B, T, C)
+        pos_emb = self.position_embedding(pos) # (1, T, C)
+        
+        x = self.dropout(tok_emb + pos_emb)
+        return x
+
+class StandardCausalSelfAttention(nn.Module):
+    """Vanilla Multi-Head Attention with Causal Mask"""
+    def __init__(self, d_model, num_heads, block_size, dropout=0.1):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.c_attn = nn.Linear(d_model, 3 * d_model)
+        self.c_proj = nn.Linear(d_model, d_model)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+        self.n_head = num_heads
+        self.n_embd = d_model
+        self.register_buffer("bias", torch.tril(torch.ones(block_size, block_size))
+                                     .view(1, 1, block_size, block_size))
+
+    def forward(self, x):
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
+class StandardBlock(nn.Module):
+    """Transformer Block: LN -> Attn -> LN -> MLP"""
+    def __init__(self, config):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(config.d_model)
+        self.attn = StandardCausalSelfAttention(config.d_model, config.num_heads, config.block_size, config.dropout)
+        self.ln2 = nn.LayerNorm(config.d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(config.d_model, 4 * config.d_model),
+            nn.GELU(),
+            nn.Linear(4 * config.d_model, config.d_model),
+            nn.Dropout(config.dropout),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
+        return x
+
 
 
 # ==========================================
@@ -467,86 +548,155 @@ class CollapseHead(nn.Module):
 # Wave-Native GPT
 # ==========================================
 
-class WaveGPT(nn.Module):
-    """
-    Language model where everything is waves.
-    
-    Token → Wave Packet → Interference → Superposition → Collapse → Token
-    """
+# Placeholder for WaveGPTConfig, assuming it's defined elsewhere
+class WaveGPTConfig:
+    def __init__(self, vocab_size, d_model, num_heads, num_waves, dropout, num_harmonics, num_layers, block_size, model_type="wave", pure_wave_attention=False, pure_wave_kernel='elu_plus_one', pure_wave_mode='quadratic'):
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.num_waves = num_waves
+        self.dropout = dropout
+        self.num_harmonics = num_harmonics
+        self.num_layers = num_layers
+        self.block_size = block_size
+        self.model_type = model_type
+        self.pure_wave_attention = pure_wave_attention
+        self.pure_wave_kernel = pure_wave_kernel
+        self.pure_wave_mode = pure_wave_mode
+
+# Placeholder for StandardEmbedding and StandardBlock
+# These classes were referenced in the diff but not provided.
+# For the code to be syntactically correct, I'll add minimal placeholder definitions.
+class StandardEmbedding(nn.Module):
+    def __init__(self, vocab_size, d_model, block_size, dropout):
+        super().__init__()
+        self.token_embeddings = nn.Embedding(vocab_size, d_model)
+        self.position_embeddings = nn.Embedding(block_size, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.block_size = block_size
+
+    def forward(self, idx):
+        B, T = idx.shape
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        token_emb = self.token_embeddings(idx)
+        pos_emb = self.position_embeddings(pos)
+        x = self.dropout(token_emb + pos_emb)
+        return x
+
+class StandardBlock(nn.Module):
     def __init__(self, config):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(config.d_model)
+        self.attn = nn.MultiheadAttention(config.d_model, config.num_heads, dropout=config.dropout, batch_first=True)
+        self.ln2 = nn.LayerNorm(config.d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(config.d_model, 4 * config.d_model),
+            nn.GELU(),
+            nn.Linear(4 * config.d_model, config.d_model),
+            nn.Dropout(config.dropout),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x), self.ln1(x), self.ln1(x), attn_mask=self._generate_square_subsequent_mask(x.size(1)).to(x.device))[0]
+        x = x + self.mlp(self.ln2(x))
+        return x
+    
+    def _generate_square_subsequent_mask(self, sz):
+        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+
+
+class WaveGPT(nn.Module):
+    def __init__(self, config: WaveGPTConfig):
         super().__init__()
         self.config = config
         
-        # Wave packet embedding (tokens as waves with harmonics)
-        self.embedding = WavePacketEmbedding(
-            config.vocab_size, config.d_model, config.num_waves, config.num_harmonics
-        )
+        if config.model_type == "standard":
+            # --- Standard Transformer ---
+            self.embedding = StandardEmbedding(
+                config.vocab_size, config.d_model, config.block_size, config.dropout
+            )
+            self.blocks = nn.ModuleList([
+                StandardBlock(config) for _ in range(config.num_layers)
+            ])
+            self.ln_f = nn.LayerNorm(config.d_model) # Final LN
+            self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+            
+        else:
+            # --- Wave-Native Transformer ---
+            self.embedding = WavePacketEmbedding(
+                config.vocab_size, config.d_model, 
+                config.num_waves, config.num_harmonics
+            )
+            self.blocks = nn.ModuleList([
+                WaveBlock(config) for _ in range(config.num_layers)
+            ])
+            self.ln_f = nn.LayerNorm(config.d_model)
+            self.head = CollapseHead(config.d_model, config.vocab_size)
         
-        # Stack of wave blocks
-        self.blocks = nn.ModuleList([
-            WaveBlock(config) for _ in range(config.num_layers)
-        ])
-        
-        # Collapse: wave → token
-        self.head = CollapseHead(config.d_model, config.vocab_size)
-        
-        # Initialize
+        # Init weights
         self.apply(self._init_weights)
-        
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
-                nn.init.zeros_(module.bias)
-                
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
     def forward(self, idx, targets=None):
-        """
-        idx: (B, T) token indices
-        targets: (B, T) target token indices (optional)
-        """
-        # Embed tokens as wave packets
+        B, T = idx.shape
+        
+        # 1. Embedding
         x = self.embedding(idx)
         
-        # Wave interference through blocks
+        # 2. Blocks
         for block in self.blocks:
             x = block(x)
             
-        # Collapse to token predictions
+        # 3. Final LN
+        x = self.ln_f(x)
+        
+        # 4. Collapse/Head
         logits = self.head(x)
         
-        # Compute loss if targets provided
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), 
-                targets.view(-1)
-            )
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
             
         return logits, loss
-    
+
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """Generate tokens via repeated wave collapse"""
+        """
+        Generate tokens one by one
+        """
         for _ in range(max_new_tokens):
-            # Crop to block size
-            idx_cond = idx[:, -self.config.block_size:]
-            
-            # Forward pass
+            # Crop to block size if needed
+            if idx.size(1) > self.config.block_size:
+                idx_cond = idx[:, -self.config.block_size:]
+            else:
+                idx_cond = idx
+                
+            # Forward
             logits, _ = self(idx_cond)
             
-            # Get last token's logits
+            # Select last step
             logits = logits[:, -1, :] / temperature
             
-            # Optional top-k sampling
+            # Top-K sampling (optional)
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float('-inf')
+                logits[logits < v[:, [-1]]] = -float('Inf')
                 
-            # Sample (wave collapse!)
+            # Sample
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             
             # Append
-            idx = torch.cat([idx, idx_next], dim=1)
+            idx = torch.cat((idx, idx_next), dim=1)
             
-        return idx
+        return idx # Return full sequence
+

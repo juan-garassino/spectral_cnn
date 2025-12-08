@@ -107,43 +107,57 @@ class ExperimentConfig:
     dropout: float = 0.1 # Default 0.1 for Baseline
     warmup_steps: int = 500
     patience: int = 8   # Scientific default
-    steps: int = 5000   # Scientific default (standard epoch)
+    steps: int = 10000   # Scaled for 500M tokens (~7.4 tokens/param)
     wave_ratio_schedule: bool = True  # Schedule wave_ratio from 0.5 to 0.9
+    model_type: str = "wave" # "wave" or "standard"
 
 
 ABLATION_EXPERIMENTS = {
-    # 1. Baseline (Control)
-    "baseline": ExperimentConfig(
-        name="Baseline (AdamW + CE)",
+    # 1. Standard Transformer (TRUE Control)
+    "standard_transformer": ExperimentConfig(
+        name="Standard Transformer (GPT-2)",
+        model_type="standard",
+        use_rgd=False, use_qfe=False,
+        lr=6e-4, dropout=0.1
+    ),
+
+    # 2. Wave Baseline (Architecture Check)
+    "wave_baseline": ExperimentConfig(
+        name="Wave Baseline (AdamW + CE)",
+        model_type="wave",
         use_rgd=False, use_qfe=False,
         lr=6e-4, dropout=0.1  # Standard NanoGPT settings (0.1)
     ),
     
-    # 2. RGD Only (Aggressive Test)
+    # 3. RGD Only (Aggressive Test)
     "rgd_only": ExperimentConfig(
         name="RGD Only",
+        model_type="wave",
         use_rgd=True, use_qfe=False,
         lr=1e-3, dropout=0.1
     ),
     
-    # 3. Full Physics (RGD + QFE + Aggressive)
+    # 4. Full Physics (RGD + QFE + Aggressive)
     "full_physics": ExperimentConfig(
         name="Full Physics (RGD + QFE)",
+        model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.0, # NO DROPOUT - rely on QFE
         qfe_lambda=0.1        # Stronger QFE
     ),
     
-    # 4. QFE Only
+    # 5. QFE Only
     "qfe_only": ExperimentConfig(
         name="QFE Only", 
+        model_type="wave",
         use_rgd=False, use_qfe=True,
         lr=6e-4, dropout=0.1
     ),
 
-    # 5. Pure Wave Variants (Inherit Physics Settings: RGD=True)
+    # 6. Pure Wave Variants (Inherit Physics Settings: RGD=True)
     "pure_wave": ExperimentConfig(
         name="Pure Wave (ELU+1) 🌊",
+        model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
@@ -151,6 +165,7 @@ ABLATION_EXPERIMENTS = {
     ),
     "pure_wave_linear": ExperimentConfig(
         name="Pure Wave (Linear O(N)) ⚡️",
+        model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
@@ -159,6 +174,7 @@ ABLATION_EXPERIMENTS = {
     ),
     "pure_wave_sigmoid": ExperimentConfig(
         name="Pure Wave (Sigmoid) 🌊",
+        model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
@@ -166,6 +182,7 @@ ABLATION_EXPERIMENTS = {
     ),
     "pure_wave_exp": ExperimentConfig(
         name="Pure Wave (Exp) 🌊",
+        model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
@@ -214,7 +231,7 @@ MODEL_CONFIGS = {
 # Dataset Loaders
 # ==========================================
 
-def load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=100_000_000):
+def load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=500_000_000):
     """
     Load FineWeb-Edu and tokenize with Tiktoken until exactly target_tokens.
     """
@@ -260,7 +277,7 @@ def load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=100_000_0
     return data
 
 
-def get_dataset(dataset_name: str, console, max_tokens: int = 100_000_000):
+def get_dataset(dataset_name: str, console, max_tokens: int = 500_000_000):
     """Get dataset by name"""
     if dataset_name == "shakespeare":
         # Fallback to shakespeare if explicit
@@ -560,27 +577,48 @@ def run_ablation_suite(
         exp_config = ABLATION_EXPERIMENTS[exp_name]
         exp_config.steps = steps  # Override if needed, but default is now Scientific 5000
         
-        # Create model
-        wave_config = WaveGPTConfig(
-            vocab_size=model_config.vocab_size,
-            d_model=model_config.d_model,
-            num_layers=model_config.num_layers,
-            num_heads=model_config.num_heads,
-            num_waves=model_config.num_waves,
-            num_harmonics=model_config.num_harmonics,
-            block_size=model_config.block_size,
-            dropout=exp_config.dropout,
-            pure_wave_attention=getattr(exp_config, 'pure_wave_attention', False),
-            pure_wave_kernel=getattr(exp_config, 'pure_wave_kernel', 'elu_plus_one'),
-            pure_wave_mode=getattr(exp_config, 'pure_wave_mode', 'quadratic')
-        )
+        if getattr(exp_config, 'model_type', 'wave') == "wave":
+            wave_config = WaveGPTConfig(
+                vocab_size=model_config.vocab_size,
+                d_model=model_config.d_model,
+                num_layers=model_config.num_layers,
+                num_heads=model_config.num_heads,
+                num_waves=model_config.num_waves,
+                num_harmonics=model_config.num_harmonics,
+                block_size=model_config.block_size,
+                dropout=exp_config.dropout,
+                pure_wave_attention=getattr(exp_config, 'pure_wave_attention', False),
+                pure_wave_kernel=getattr(exp_config, 'pure_wave_kernel', 'elu_plus_one'),
+                pure_wave_mode=getattr(exp_config, 'pure_wave_mode', 'quadratic'),
+                model_type="wave"
+            )
+        else:
+             wave_config = WaveGPTConfig(
+                vocab_size=model_config.vocab_size,
+                d_model=model_config.d_model,
+                num_layers=model_config.num_layers,
+                num_heads=model_config.num_heads,
+                num_waves=model_config.num_waves,
+                num_harmonics=model_config.num_harmonics,
+                block_size=model_config.block_size,
+                dropout=exp_config.dropout,
+                model_type="standard" # Flag for Standard
+             )
+        
         model = WaveGPT(wave_config).to(device)
+        
+        # Count Parameters
+        params = sum(p.numel() for p in model.parameters())
+        console.print(f"📊 Parameters: {params:,} ({params/1e6:.2f}M)")
         
         # DataParallel if requested
         if parallel and torch.cuda.device_count() > 1:
             console.print(f"🔀 Using DataParallel on {torch.cuda.device_count()} GPUs")
             model = nn.DataParallel(model)
         
+        # Print Detailed Stats
+        print_detailed_stats(model, model_config, dataset, train_data, val_data, console)
+
         # Train
         result = train_experiment(
             model, train_data, val_data, exp_config, model_config, console, device
@@ -728,6 +766,60 @@ def print_results_table(results: Dict, console: Console):
 # Main
 # ==========================================
 
+def print_detailed_stats(model, config, tokenizer_name, train_data, val_data, console):
+    """Print comprehensive breakdown of model and data statistics"""
+    
+    # 1. Dataset Stats
+    total_tokens = len(train_data) + len(val_data)
+    
+    table = Table(title="📚 Dataset Statistics", border_style="blue")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="white")
+    
+    table.add_row("Total Tokens", f"{total_tokens:,}")
+    table.add_row("Train Split", f"{len(train_data):,} ({len(train_data)/total_tokens:.1%})")
+    table.add_row("Validation Split", f"{len(val_data):,} ({len(val_data)/total_tokens:.1%})")
+    table.add_row("Tokenizer", "TikToken (GPT-2)" if "fineweb" in tokenizer_name else "BasicTokenizer")
+    
+    console.print(table)
+    
+    # 2. Parameter Breakdown
+    embed_params = 0
+    attn_params = 0
+    mlp_params = 0
+    other_params = 0
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad: continue
+        
+        n = name.lower()
+        if "embed" in n or "wte" in n or "wpe" in n:
+            embed_params += param.numel()
+        elif "attn" in n or "attention" in n:
+            attn_params += param.numel()
+        elif "mlp" in n:
+            mlp_params += param.numel()
+        else:
+            other_params += param.numel()
+            
+    total_params = embed_params + attn_params + mlp_params + other_params
+    
+    # Model Stats Table
+    m_table = Table(title="🧠 Model Parameter Breakdown", border_style="magenta")
+    m_table.add_column("Component", style="green")
+    m_table.add_column("Parameters", style="white", justify="right")
+    m_table.add_column("% of Total", style="yellow", justify="right")
+    
+    m_table.add_row("Embeddings", f"{embed_params:,}", f"{embed_params/total_params:.1%}")
+    m_table.add_row("Attention", f"{attn_params:,}", f"{attn_params/total_params:.1%}")
+    m_table.add_row("MLP", f"{mlp_params:,}", f"{mlp_params/total_params:.1%}")
+    m_table.add_row("Other (Norms/Head)", f"{other_params:,}", f"{other_params/total_params:.1%}")
+    m_table.add_row("TOTAL", f"{total_params:,}", "100.0%", style="bold")
+    
+    console.print(m_table)
+    console.print(f"📊 Ratio: {total_tokens/total_params:.2f} Tokens per Parameter (Target > 7.4)", style="bold purple")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Wave-Native GPT Experiment Suite")
     parser.add_argument("--experiment", type=str, nargs="+", default=["all"],
@@ -739,7 +831,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="fineweb",
                         choices=["shakespeare", "fineweb_small", "fineweb", "fineweb_large"],
                         help="Dataset to use")
-    parser.add_argument("--steps", type=int, default=5000,
+    parser.add_argument("--steps", type=int, default=10000,
                         help="Training steps per experiment")
     parser.add_argument("--parallel", action="store_true",
                         help="Use DataParallel for multi-GPU")
