@@ -637,7 +637,10 @@ def run_ablation_suite(
         context_tensor = torch.tensor([context_ids], dtype=torch.long, device=device)
         
         # Generate
-        gen_ids = model.generate(context_tensor, max_new_tokens=100, temperature=0.8)
+        if isinstance(model, nn.DataParallel):
+            gen_ids = model.module.generate(context_tensor, max_new_tokens=100, temperature=0.8)
+        else:
+            gen_ids = model.generate(context_tensor, max_new_tokens=100, temperature=0.8)
         
         # Decode
         if hasattr(tokenizer, 'decode'):
