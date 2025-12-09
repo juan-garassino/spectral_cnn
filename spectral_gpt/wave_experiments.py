@@ -110,6 +110,9 @@ class ExperimentConfig:
     steps: int = 10000   # Scaled for 500M tokens (~7.4 tokens/param)
     wave_ratio_schedule: bool = True  # Schedule wave_ratio from 0.5 to 0.9
     model_type: str = "wave" # "wave" or "standard"
+    grad_accum_steps: int = 2 # Restore effective B=32 (since physical B=16)
+
+
 
 
 ABLATION_EXPERIMENTS = {
@@ -408,41 +411,53 @@ def train_experiment(
                     ).to(device)
                 wave_ratios.append(torch.sigmoid(base_model.embedding.wave_ratio).item())
             
-            # Get batch
-            x, y = get_batch(train_data, model_config.batch_size, model_config.block_size, device)
-            total_tokens += x.numel()
             
-            # Forward
-            optimizer.zero_grad()
-            logits, ce_loss = model(x, y)
+            # --- Gradient Accumulation Loop ---
+            accum_loss_scalar = 0.0
             
-            # Compute loss
-            if exp_config.use_qfe and loss_fn is not None:
-                loss_dict = loss_fn(logits, y, return_components=True)
-                loss = loss_dict['total']
-                coherence_losses.append(loss_dict['coherence'].item())
-            else:
-                loss = ce_loss
-                if loss.ndim > 0:
-                    loss = loss.mean()
+            optimizer.zero_grad() # Zero gradients before accumulation starts
             
-            # Check for NaN
-            if torch.isnan(loss) or torch.isinf(loss):
-                console.print(f"[red]NaN/Inf at step {step}[/red]")
-                break
-            
-            # Backward
-            loss.backward()
+            for _ in range(exp_config.grad_accum_steps):
+                # Get batch
+                x, y = get_batch(train_data, model_config.batch_size, model_config.block_size, device)
+                total_tokens += x.numel()
+                
+                # Forward (no masking needed for GPT generally, handled in attn)
+                logits, ce_loss = model(x, y)
+                
+                # Compute loss
+                if exp_config.use_qfe and loss_fn is not None:
+                    loss_dict = loss_fn(logits, y, return_components=True)
+                    loss = loss_dict['total']
+                    coherence_losses.append(loss_dict['coherence'].item())
+                else:
+                    loss = ce_loss
+                    if loss.ndim > 0:
+                        loss = loss.mean()
+                
+                # Check for NaN
+                if torch.isnan(loss) or torch.isinf(loss):
+                    console.print(f"[red]NaN/Inf at step {step}[/red]")
+                    return {'loss': float('nan')}
+                
+                # Scale loss for accumulation
+                loss = loss / exp_config.grad_accum_steps
+                
+                # Backward
+                loss.backward()
+                
+                # Track raw loss (unscaled) for logging
+                accum_loss_scalar += loss.item() * exp_config.grad_accum_steps
+
+            # Update weights after accumulation
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             
-            # Ensure ce_loss is scalar for logging
-            ce_loss_scalar = ce_loss
-            if ce_loss_scalar.ndim > 0:
-                ce_loss_scalar = ce_loss_scalar.mean()
-            
-            losses.append(ce_loss_scalar.item())
-            progress.update(task, advance=1, loss=ce_loss_scalar.item())
+            # Average loss over accumulation steps (approximate)
+            avg_loss = accum_loss_scalar / exp_config.grad_accum_steps
+            losses.append(avg_loss)
+            progress.update(task, advance=1, loss=avg_loss)
+
             
             # Check every 250 steps for scientific rigor
             if (step + 1) % 250 == 0:
