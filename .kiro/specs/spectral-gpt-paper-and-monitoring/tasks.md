@@ -270,23 +270,23 @@
   - Implement main() function to orchestrate generation
   - _Requirements: 1.4, 6.4_
 
-- [ ] 12. Checkpoint - Ensure all tests pass
+- [x] 12. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 13. Add dry-run support for testing
+- [x] 13. Add dry-run support for testing
   - Implement dry-run mode that uses mock data
   - Add --dry-run flag to experiment scripts
   - Create small test datasets for quick validation
   - _Requirements: All_
 
-- [ ] 13.1 Implement dry-run mode
+- [x] 13.1 Implement dry-run mode
   - Add --dry-run flag to wave_experiments.py
   - Create mock training loop that runs for 10 steps
   - Use small batch size and model for fast testing
   - Verify all monitoring components work in dry-run mode
   - _Requirements: 2.1, 3.1, 4.1, 5.1_
 
-- [ ] 13.2 Test monitoring with dry-run
+- [x] 13.2 Test monitoring with dry-run
   - Run dry-run experiment with all monitoring enabled
   - Verify checkpoints saved at correct intervals
   - Verify metrics logged correctly
@@ -294,7 +294,7 @@
   - Verify config and results files created
   - _Requirements: 2.1, 2.2, 3.1, 4.1, 5.1_
 
-- [ ] 13.3 Generate documentation from existing experiments
+- [x] 13.3 Generate documentation from existing experiments
   - Load experiment results from spectral_gpt/experiment_results/results.txt
   - Parse results for Standard Transformer, Full Physics, and RGD Only experiments
   - Run paper generation on existing experiment data
@@ -305,14 +305,14 @@
   - Generate PDFs and verify rendering
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 6.1, 6.2, 6.3, 6.4, 6.5_
 
-- [ ] 14. Documentation and examples
+- [x] 14. Documentation and examples
   - Write README for monitoring system
   - Create usage examples
   - Document configuration options
   - Add troubleshooting guide
   - _Requirements: 6.4, 6.5_
 
-- [ ] 14.1 Create monitoring system documentation
+- [x] 14.1 Create monitoring system documentation
   - Write README.md explaining monitoring components
   - Add usage examples for each component
   - Document configuration options
@@ -320,7 +320,7 @@
   - Add examples of resuming from checkpoints
   - _Requirements: 6.4, 6.5_
 
-- [ ] 14.2 Create paper generation documentation
+- [x] 14.2 Create paper generation documentation
   - Write guide for generating intuitive guide
   - Write guide for generating technical paper
   - Add examples of customizing templates
@@ -328,5 +328,5 @@
   - Explain figure management system
   - _Requirements: 6.4, 6.5_
 
-- [ ] 15. Final checkpoint - Make sure all tests are passing
+- [x] 15. Final checkpoint - Make sure all tests are passing
   - Ensure all tests pass, ask the user if questions arise.

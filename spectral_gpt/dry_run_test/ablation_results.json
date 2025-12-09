@@ -1,0 +1,28 @@
+{
+  "wave_baseline": {
+    "val_loss": 10.90847396850586,
+    "perplexity": 54637.40234375,
+    "speed": 205.78704726226707,
+    "time": 99.52035500999773,
+    "config": {
+      "name": "Wave Baseline (AdamW + CE)",
+      "use_rgd": false,
+      "use_qfe": false,
+      "pure_wave_attention": false,
+      "pure_wave_kernel": "elu_plus_one",
+      "pure_wave_mode": "quadratic",
+      "rgd_strength": 0.3,
+      "qfe_lambda": 0.05,
+      "qfe_threshold": 0.01,
+      "lr": 0.0006,
+      "weight_decay": 0.01,
+      "dropout": 0.1,
+      "warmup_steps": 500,
+      "patience": 8,
+      "steps": 10,
+      "wave_ratio_schedule": true,
+      "model_type": "wave",
+      "grad_accum_steps": 2
+    }
+  }
+}

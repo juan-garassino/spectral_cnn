@@ -285,8 +285,26 @@ def load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=500_000_0
     return data
 
 
-def get_dataset(dataset_name: str, console, max_tokens: int = 500_000_000):
+def create_mock_dataset(vocab_size: int = 50257, num_tokens: int = 10000) -> torch.Tensor:
+    """
+    Create mock dataset for dry-run testing.
+    
+    Args:
+        vocab_size: Size of vocabulary
+        num_tokens: Number of tokens to generate
+        
+    Returns:
+        Tensor of random token IDs
+    """
+    return torch.randint(0, vocab_size, (num_tokens,), dtype=torch.long)
+
+
+def get_dataset(dataset_name: str, console, max_tokens: int = 500_000_000, dry_run: bool = False):
     """Get dataset by name"""
+    if dry_run:
+        console.print("[yellow]📦 Creating mock dataset for dry-run...[/yellow]")
+        return create_mock_dataset(vocab_size=50257, num_tokens=10000)
+    
     if dataset_name == "shakespeare":
         # Fallback to shakespeare if explicit
         return load_shakespeare(console) # Returns text, not tensor
@@ -310,7 +328,8 @@ def train_experiment(
     console: Console,
     device: str = "cuda",
     experiment_dir: Optional[str] = None,
-    enable_monitoring: bool = True
+    enable_monitoring: bool = True,
+    dry_run: bool = False
 ) -> Dict:
     """Train a single experiment configuration with optional monitoring"""
     
@@ -337,21 +356,25 @@ def train_experiment(
         dirs = create_experiment_directory("experiments", experiment_dir)
         console.print(f"📁 Experiment directory: {dirs['root']}")
         
-        # Initialize monitoring components
+        # Initialize monitoring components with adjusted intervals for dry-run
+        checkpoint_interval = 5 if dry_run else 1000
+        log_interval = 1 if dry_run else 10
+        viz_interval = 5 if dry_run else 1000
+        
         checkpoint_manager = CheckpointManager(
             experiment_dir=dirs['root'],
-            save_interval=1000,
+            save_interval=checkpoint_interval,
             keep_last_n=3
         )
         
         metrics_logger = MetricsLogger(
             log_dir=dirs['logs'],
-            log_interval=10
+            log_interval=log_interval
         )
         
         viz_manager = VisualizationManager(
             viz_dir=dirs['visualizations'],
-            viz_interval=1000
+            viz_interval=viz_interval
         )
         
         config_tracker = ConfigTracker(
@@ -753,7 +776,8 @@ def run_ablation_suite(
     dataset: str = "shakespeare",
     steps: int = 20000,
     device: str = "cuda",
-    parallel: bool = False
+    parallel: bool = False,
+    dry_run: bool = False
 ) -> Dict:
     """Run ablation study experiments"""
     
@@ -762,17 +786,27 @@ def run_ablation_suite(
     
     model_config = MODEL_CONFIGS[model_size]
     
+    # Override settings for dry-run mode
+    if dry_run:
+        console.print("[bold yellow]🧪 DRY-RUN MODE ENABLED[/bold yellow]")
+        console.print("[yellow]Using small model, mock data, and 10 training steps for fast testing[/yellow]\n")
+        steps = 10
+        model_size = "small"
+        model_config = MODEL_CONFIGS[model_size]
+        # Use smaller batch size for faster testing
+        model_config.batch_size = 4
+    
     console.print(Panel.fit(
         f"[bold magenta]🔬 WAVE-NATIVE GPT ABLATION SUITE[/bold magenta]\n\n"
         f"Model: {model_config.name}\n"
         f"Dataset: {dataset}\n"
         f"Experiments: {', '.join(experiments)}\n"
-        f"Steps per experiment: {steps}",
+        f"Steps per experiment: {steps}" + ("\n[yellow]DRY-RUN MODE[/yellow]" if dry_run else ""),
         border_style="magenta"
     ))
     
     # Load data (Directly returns tensor if tiktoken, text if shakespeare)
-    data_or_text = get_dataset(dataset, console)
+    data_or_text = get_dataset(dataset, console, dry_run=dry_run)
     
     if isinstance(data_or_text, torch.Tensor):
         # Already tokenized (FineWeb/Tiktoken)
@@ -856,7 +890,8 @@ def run_ablation_suite(
         result = train_experiment(
             model, train_data, val_data, exp_config, model_config, console, device,
             experiment_dir=experiment_id,
-            enable_monitoring=True
+            enable_monitoring=True,
+            dry_run=dry_run
         )
         
         # GENERATION CHECK (Scientific Visual Verification)
@@ -910,11 +945,18 @@ def plot_ablation_results(results: Dict, save_dir: str):
     
     for i, (name, result) in enumerate(results.items()):
         losses = result['losses']
-        window = 100
-        smoothed = np.convolve(losses, np.ones(window)/window, mode='valid')
-        ax.plot(range(window-1, len(losses)), smoothed, 
-                label=f"{result['name']} (final: {result['val_loss']:.3f})",
-                color=colors[i % len(colors)], linewidth=2)
+        # Adjust window size for short runs
+        window = min(100, max(1, len(losses) // 10))
+        if len(losses) < window:
+            # No smoothing for very short runs
+            ax.plot(range(len(losses)), losses, 
+                    label=f"{result['name']} (final: {result['val_loss']:.3f})",
+                    color=colors[i % len(colors)], linewidth=2)
+        else:
+            smoothed = np.convolve(losses, np.ones(window)/window, mode='valid')
+            ax.plot(range(window-1, len(losses)), smoothed, 
+                    label=f"{result['name']} (final: {result['val_loss']:.3f})",
+                    color=colors[i % len(colors)], linewidth=2)
     
     ax.set_xlabel('Step')
     ax.set_ylabel('Loss')
@@ -1075,6 +1117,8 @@ def main():
                         help="Use DataParallel for multi-GPU")
     parser.add_argument("--output", type=str, default="experiment_results",
                         help="Output directory")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Run in dry-run mode with mock data for fast testing (10 steps)")
     
     args = parser.parse_args()
     
@@ -1089,7 +1133,8 @@ def main():
         dataset=args.dataset,
         steps=args.steps,
         device=device,
-        parallel=args.parallel
+        parallel=args.parallel,
+        dry_run=args.dry_run
     )
     
     if not results:
