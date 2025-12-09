@@ -1,0 +1,15 @@
+{"step": 10, "timestamp": "2025-12-09T14:18:44.438209", "loss": 1.1554290056228638, "learning_rate": 0.001, "perplexity": 7.1, "wave_ratio": 0.53}
+{"step": 20, "timestamp": "2025-12-09T14:18:44.447035", "loss": 1.036014199256897, "learning_rate": 0.001, "perplexity": 6.7, "wave_ratio": 0.56}
+{"step": 30, "timestamp": "2025-12-09T14:18:44.455182", "loss": 1.119019627571106, "learning_rate": 0.001, "perplexity": 6.3, "wave_ratio": 0.59}
+{"step": 40, "timestamp": "2025-12-09T14:18:44.463425", "loss": 1.183572769165039, "learning_rate": 0.001, "perplexity": 5.9, "wave_ratio": 0.62}
+{"step": 50, "timestamp": "2025-12-09T14:18:44.471375", "loss": 1.1515610218048096, "learning_rate": 0.001, "perplexity": 5.5, "wave_ratio": 0.65}
+{"step": 60, "timestamp": "2025-12-09T14:18:45.461719", "loss": 1.1161013841629028, "learning_rate": 0.001, "perplexity": 5.1, "wave_ratio": 0.6799999999999999}
+{"step": 70, "timestamp": "2025-12-09T14:18:45.469535", "loss": 1.011134386062622, "learning_rate": 0.001, "perplexity": 4.699999999999999, "wave_ratio": 0.71}
+{"step": 80, "timestamp": "2025-12-09T14:18:45.478630", "loss": 0.9907207489013672, "learning_rate": 0.001, "perplexity": 4.3, "wave_ratio": 0.74}
+{"step": 90, "timestamp": "2025-12-09T14:18:45.486891", "loss": 1.2273331880569458, "learning_rate": 0.001, "perplexity": 3.9, "wave_ratio": 0.77}
+{"step": 100, "timestamp": "2025-12-09T14:18:45.495652", "loss": 1.0334312915802002, "learning_rate": 0.001, "perplexity": 3.5, "wave_ratio": 0.8}
+{"step": 110, "timestamp": "2025-12-09T14:18:46.505318", "loss": 1.0434558391571045, "learning_rate": 0.001, "perplexity": 3.0999999999999996, "wave_ratio": 0.8300000000000001}
+{"step": 120, "timestamp": "2025-12-09T14:18:46.514026", "loss": 0.9786054491996765, "learning_rate": 0.001, "perplexity": 2.7, "wave_ratio": 0.86}
+{"step": 130, "timestamp": "2025-12-09T14:18:46.522278", "loss": 0.8739527463912964, "learning_rate": 0.001, "perplexity": 2.3, "wave_ratio": 0.89}
+{"step": 140, "timestamp": "2025-12-09T14:18:46.530533", "loss": 0.9817788004875183, "learning_rate": 0.001, "perplexity": 1.8999999999999995, "wave_ratio": 0.9199999999999999}
+{"step": 150, "timestamp": "2025-12-09T14:18:46.538467", "loss": 1.147443175315857, "learning_rate": 0.001, "perplexity": 1.5, "wave_ratio": 0.95}

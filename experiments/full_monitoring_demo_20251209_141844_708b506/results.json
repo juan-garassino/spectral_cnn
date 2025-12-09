@@ -1,0 +1,12 @@
+{
+  "experiment_id": "full_monitoring_demo_20251209_141844_708b506",
+  "timestamp": "2025-12-09T14:18:47.430576",
+  "final_metrics": {
+    "val_loss": 1.147443175315857,
+    "best_val_loss": 0.7792547941207886,
+    "best_step": 143,
+    "total_time_seconds": 3.0032060146331787,
+    "final_perplexity": 1.5
+  },
+  "best_checkpoint": "checkpoint_step_100.pt"
+}

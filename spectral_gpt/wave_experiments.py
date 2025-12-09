@@ -308,15 +308,112 @@ def train_experiment(
     exp_config: ExperimentConfig,
     model_config: ModelConfig,
     console: Console,
-    device: str = "cuda"
+    device: str = "cuda",
+    experiment_dir: Optional[str] = None,
+    enable_monitoring: bool = True
 ) -> Dict:
-    """Train a single experiment configuration"""
+    """Train a single experiment configuration with optional monitoring"""
     
     console.print(Panel(f"[bold cyan]{exp_config.name}[/bold cyan]", border_style="cyan"))
     
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: {params:,} ({params/1e6:.2f}M)")
     console.print(f"🔄 Steps: {exp_config.steps}")
+    
+    # Initialize monitoring components if enabled
+    checkpoint_manager = None
+    metrics_logger = None
+    viz_manager = None
+    config_tracker = None
+    
+    if enable_monitoring and experiment_dir:
+        from monitoring import (
+            CheckpointManager, MetricsLogger, 
+            VisualizationManager, ConfigTracker,
+            create_experiment_directory
+        )
+        
+        # Create experiment directory structure
+        dirs = create_experiment_directory("experiments", experiment_dir)
+        console.print(f"📁 Experiment directory: {dirs['root']}")
+        
+        # Initialize monitoring components
+        checkpoint_manager = CheckpointManager(
+            experiment_dir=dirs['root'],
+            save_interval=1000,
+            keep_last_n=3
+        )
+        
+        metrics_logger = MetricsLogger(
+            log_dir=dirs['logs'],
+            log_interval=10
+        )
+        
+        viz_manager = VisualizationManager(
+            viz_dir=dirs['visualizations'],
+            viz_interval=1000
+        )
+        
+        config_tracker = ConfigTracker(
+            experiment_dir=dirs['root']
+        )
+        
+        # Save initial configuration
+        config_dict = {
+            'experiment_name': exp_config.name,
+            'model_config': {
+                'd_model': model_config.d_model,
+                'num_layers': model_config.num_layers,
+                'num_heads': model_config.num_heads,
+                'num_waves': model_config.num_waves,
+                'num_harmonics': model_config.num_harmonics,
+                'vocab_size': model_config.vocab_size,
+                'block_size': model_config.block_size,
+                'batch_size': model_config.batch_size
+            },
+            'training_config': asdict(exp_config)
+        }
+        
+        dataset_info = {
+            'train_tokens': len(train_data),
+            'val_tokens': len(val_data),
+            'total_tokens': len(train_data) + len(val_data)
+        }
+        
+        try:
+            config_tracker.save_config(config_dict, model, dataset_info)
+            console.print("✓ Configuration saved")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to save config: {e}[/yellow]")
+    
+    # Check for existing checkpoint and offer resumption
+    start_step = 0
+    resumed_loss_history = []
+    if checkpoint_manager:
+        try:
+            checkpoint = checkpoint_manager.load_latest_checkpoint()
+            if checkpoint:
+                console.print(f"[yellow]Found existing checkpoint at step {checkpoint['step']}[/yellow]")
+                console.print(f"[yellow]Checkpoint loss: {checkpoint['loss_history'][-1] if checkpoint.get('loss_history') else 'N/A'}[/yellow]")
+                console.print("[yellow]Resume from checkpoint? (y/n)[/yellow]")
+                # For automated runs, we'll skip resumption by default
+                # In interactive mode, user can modify this
+                resume = False  # Set to True to enable auto-resume
+                
+                if resume:
+                    # Load model state
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    start_step = checkpoint['step'] + 1
+                    
+                    # Restore loss history for continuity verification
+                    if 'loss_history' in checkpoint:
+                        resumed_loss_history = checkpoint['loss_history']
+                        console.print(f"[green]✓ Restored {len(resumed_loss_history)} loss values[/green]")
+                    
+                    console.print(f"[green]✓ Resumed from step {checkpoint['step']}[/green]")
+                    console.print(f"[green]✓ Will continue training from step {start_step}[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to load checkpoint: {e}[/yellow]")
     
     # Setup optimizer
     # Setup optimizer
@@ -332,6 +429,16 @@ def train_experiment(
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=exp_config.lr, weight_decay=exp_config.weight_decay)
         console.print(f"⚙️  Optimizer: AdamW")
+    
+    # Restore optimizer state if resuming from checkpoint
+    if start_step > 0 and checkpoint_manager:
+        try:
+            checkpoint = checkpoint_manager.load_latest_checkpoint()
+            if checkpoint and 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                console.print(f"[green]✓ Optimizer state restored[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to restore optimizer state: {e}[/yellow]")
     
     # Setup loss
     if exp_config.use_qfe:
@@ -362,9 +469,14 @@ def train_experiment(
         return 0.5 + 0.4 * progress
     
     model.train()
-    losses = []
+    losses = resumed_loss_history.copy() if resumed_loss_history else []
     coherence_losses = []
     wave_ratios = []
+    learning_rates = []
+    perplexities = []
+    
+    # Store the last loss before resumption for continuity verification
+    last_loss_before_resume = losses[-1] if losses else None
     
     # Early stopping tracking
     early_stopping = EarlyStopping(
@@ -388,7 +500,7 @@ def train_experiment(
     ) as progress:
         task = progress.add_task(f"Training", total=exp_config.steps, loss=0.0)
         
-        for step in range(exp_config.steps):
+        for step in range(start_step, exp_config.steps):
             # Update LR
             current_lr = get_lr(step)
             for param_group in optimizer.param_groups:
@@ -456,7 +568,54 @@ def train_experiment(
             # Average loss over accumulation steps (approximate)
             avg_loss = accum_loss_scalar / exp_config.grad_accum_steps
             losses.append(avg_loss)
+            learning_rates.append(current_lr)
             progress.update(task, advance=1, loss=avg_loss)
+            
+            # Verify loss continuity after resumption (first step only)
+            if step == start_step and last_loss_before_resume is not None:
+                loss_diff = abs(avg_loss - last_loss_before_resume)
+                if loss_diff < 0.5:  # Reasonable threshold for continuity
+                    console.print(f"[green]✓ Loss continuity verified: {last_loss_before_resume:.4f} → {avg_loss:.4f} (diff: {loss_diff:.4f})[/green]")
+                else:
+                    console.print(f"[yellow]⚠ Loss jump detected: {last_loss_before_resume:.4f} → {avg_loss:.4f} (diff: {loss_diff:.4f})[/yellow]")
+            
+            # Log metrics if monitoring enabled
+            if metrics_logger and metrics_logger.should_log(step):
+                try:
+                    metrics_dict = {
+                        'loss': avg_loss,
+                        'learning_rate': current_lr,
+                        'tokens_per_sec': total_tokens / (time.perf_counter() - start_time) if (time.perf_counter() - start_time) > 0 else 0
+                    }
+                    
+                    # Add wave-specific metrics if available
+                    if wave_ratios:
+                        metrics_dict['wave_ratio'] = wave_ratios[-1]
+                    if coherence_losses:
+                        metrics_dict['coherence_loss'] = coherence_losses[-1]
+                    
+                    metrics_logger.log_metrics(step, metrics_dict)
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to log metrics: {e}[/yellow]")
+            
+            # Save checkpoint if monitoring enabled
+            if checkpoint_manager and checkpoint_manager.should_checkpoint(step):
+                try:
+                    checkpoint_config = {
+                        'experiment_name': exp_config.name,
+                        'step': step,
+                        'total_steps': exp_config.steps
+                    }
+                    checkpoint_manager.save_checkpoint(
+                        step=step,
+                        model=model,
+                        optimizer=optimizer,
+                        loss_history=losses,
+                        config=checkpoint_config
+                    )
+                    console.print(f"[green]✓ Checkpoint saved at step {step}[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to save checkpoint: {e}[/yellow]")
 
             
             # Check every 250 steps for scientific rigor
@@ -478,9 +637,29 @@ def train_experiment(
                 model.train()
                 
                 current_val_loss = sum(val_losses_accum) / len(val_losses_accum)
+                perplexities.append(math.exp(current_val_loss))
                 
                 # Log CE loss explicitly
                 console.print(f"Step {step+1:5d} | Train(CE): {ce_loss_scalar.item():.4f} | Val: {current_val_loss:.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
+                
+                # Generate visualizations if monitoring enabled
+                if viz_manager and viz_manager.should_visualize(step + 1):
+                    try:
+                        # Prepare metrics for visualization
+                        viz_metrics = {
+                            'learning_rate': learning_rates,
+                            'perplexity': perplexities
+                        }
+                        if wave_ratios:
+                            viz_metrics['wave_ratio'] = wave_ratios
+                        if coherence_losses:
+                            viz_metrics['coherence_loss'] = coherence_losses
+                        
+                        viz_manager.generate_training_plots(step + 1, losses, viz_metrics)
+                        viz_manager.generate_model_plots(step + 1, model)
+                        console.print(f"[green]✓ Visualizations generated at step {step + 1}[/green]")
+                    except Exception as e:
+                        console.print(f"[yellow]Warning: Failed to generate visualizations: {e}[/yellow]")
                 
                  # Check Early Stopping
                 if early_stopping(current_val_loss, model):
@@ -517,6 +696,35 @@ def train_experiment(
     # Wait, the request says "Generate 100 tokens... This allows us to visually verify". Verification implies text.
     # I will stick to returning the model and letting `run_ablation_suite` handle the printing using the tokenizer it HAS.
     
+    # Save final results if monitoring enabled
+    if config_tracker:
+        try:
+            final_metrics = {
+                'val_loss': val_loss.item(),
+                'perplexity': torch.exp(val_loss).item(),
+                'best_val_loss': early_stopping.best_loss,
+                'total_time_seconds': elapsed,
+                'tokens_per_second': speed,
+                'total_steps': len(losses),
+                'final_loss': losses[-1] if losses else 0.0
+            }
+            
+            # Find best checkpoint path if available
+            best_checkpoint_path = None
+            if checkpoint_manager:
+                checkpoints = checkpoint_manager.list_checkpoints()
+                if checkpoints:
+                    best_checkpoint_path = checkpoints[-1]['path']
+            
+            config_tracker.save_results(
+                final_metrics=final_metrics,
+                best_checkpoint=best_checkpoint_path,
+                generation_samples=None  # Will be added by caller if needed
+            )
+            console.print("[green]✓ Final results saved[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to save results: {e}[/yellow]")
+    
     return {
         "name": exp_config.name,
         "config": asdict(exp_config),
@@ -529,7 +737,8 @@ def train_experiment(
         "wave_ratios": wave_ratios,
         "params": params,
         "model": model, 
-        "early_stopping_best": early_stopping.best_loss
+        "early_stopping_best": early_stopping.best_loss,
+        "experiment_dir": experiment_dir if enable_monitoring else None
     }
 
 
@@ -597,6 +806,10 @@ def run_ablation_suite(
         exp_config = ABLATION_EXPERIMENTS[exp_name]
         exp_config.steps = steps  # Override if needed, but default is now Scientific 5000
         
+        # Generate experiment ID for monitoring
+        from monitoring import generate_experiment_id
+        experiment_id = generate_experiment_id(exp_name)
+        
         if getattr(exp_config, 'model_type', 'wave') == "wave":
             wave_config = WaveGPTConfig(
                 vocab_size=model_config.vocab_size,
@@ -639,9 +852,11 @@ def run_ablation_suite(
         # Print Detailed Stats
         print_detailed_stats(model, model_config, dataset, train_data, val_data, console)
 
-        # Train
+        # Train with monitoring enabled
         result = train_experiment(
-            model, train_data, val_data, exp_config, model_config, console, device
+            model, train_data, val_data, exp_config, model_config, console, device,
+            experiment_dir=experiment_id,
+            enable_monitoring=True
         )
         
         # GENERATION CHECK (Scientific Visual Verification)

@@ -1,0 +1,15 @@
+[2025-12-09 14:18:44] Step 10: loss=1.155429, learning_rate=0.001000, perplexity=7.100000, wave_ratio=0.530000
+[2025-12-09 14:18:44] Step 20: loss=1.036014, learning_rate=0.001000, perplexity=6.700000, wave_ratio=0.560000
+[2025-12-09 14:18:44] Step 30: loss=1.119020, learning_rate=0.001000, perplexity=6.300000, wave_ratio=0.590000
+[2025-12-09 14:18:44] Step 40: loss=1.183573, learning_rate=0.001000, perplexity=5.900000, wave_ratio=0.620000
+[2025-12-09 14:18:44] Step 50: loss=1.151561, learning_rate=0.001000, perplexity=5.500000, wave_ratio=0.650000
+[2025-12-09 14:18:45] Step 60: loss=1.116101, learning_rate=0.001000, perplexity=5.100000, wave_ratio=0.680000
+[2025-12-09 14:18:45] Step 70: loss=1.011134, learning_rate=0.001000, perplexity=4.700000, wave_ratio=0.710000
+[2025-12-09 14:18:45] Step 80: loss=0.990721, learning_rate=0.001000, perplexity=4.300000, wave_ratio=0.740000
+[2025-12-09 14:18:45] Step 90: loss=1.227333, learning_rate=0.001000, perplexity=3.900000, wave_ratio=0.770000
+[2025-12-09 14:18:45] Step 100: loss=1.033431, learning_rate=0.001000, perplexity=3.500000, wave_ratio=0.800000
+[2025-12-09 14:18:46] Step 110: loss=1.043456, learning_rate=0.001000, perplexity=3.100000, wave_ratio=0.830000
+[2025-12-09 14:18:46] Step 120: loss=0.978605, learning_rate=0.001000, perplexity=2.700000, wave_ratio=0.860000
+[2025-12-09 14:18:46] Step 130: loss=0.873953, learning_rate=0.001000, perplexity=2.300000, wave_ratio=0.890000
+[2025-12-09 14:18:46] Step 140: loss=0.981779, learning_rate=0.001000, perplexity=1.900000, wave_ratio=0.920000
+[2025-12-09 14:18:46] Step 150: loss=1.147443, learning_rate=0.001000, perplexity=1.500000, wave_ratio=0.950000

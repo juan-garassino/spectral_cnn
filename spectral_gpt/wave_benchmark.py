@@ -372,13 +372,86 @@ def save_wave_visualizations(model, losses, name, save_dir):
         plt.close()
 
 def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_steps=5000, lr=3e-4, 
-                        use_radam=False, use_rgd=False, use_qfe=False):
+                        use_radam=False, use_rgd=False, use_qfe=False, experiment_dir=None, enable_monitoring=True):
     """Benchmark a single model with configurable steps, LR, optimizer, and loss"""
     console.print(Panel(f"[bold cyan]{config_name}[/bold cyan]", title="🧪 Model Config", border_style="cyan"))
     
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: [bold]{params:,}[/bold] ({params/1e6:.2f}M)")
     console.print(f"🔄 Training Steps: [bold]{num_steps}[/bold]")
+    
+    # Initialize monitoring components if enabled
+    checkpoint_manager = None
+    metrics_logger = None
+    viz_manager = None
+    config_tracker = None
+    
+    if enable_monitoring and experiment_dir:
+        import sys
+        import os
+        # Add current directory to path for monitoring import
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        
+        from monitoring import (
+            CheckpointManager, MetricsLogger, 
+            VisualizationManager, ConfigTracker,
+            create_experiment_directory
+        )
+        
+        # Create experiment directory structure
+        dirs = create_experiment_directory("experiments", experiment_dir)
+        console.print(f"📁 Experiment directory: {dirs['root']}")
+        
+        # Initialize monitoring components
+        checkpoint_manager = CheckpointManager(
+            experiment_dir=dirs['root'],
+            save_interval=500,  # More frequent for benchmark
+            keep_last_n=3
+        )
+        
+        metrics_logger = MetricsLogger(
+            log_dir=dirs['logs'],
+            log_interval=10
+        )
+        
+        viz_manager = VisualizationManager(
+            viz_dir=dirs['visualizations'],
+            viz_interval=500  # More frequent for benchmark
+        )
+        
+        config_tracker = ConfigTracker(
+            experiment_dir=dirs['root']
+        )
+        
+        # Save initial configuration
+        config_dict = {
+            'model_name': config_name,
+            'num_steps': num_steps,
+            'learning_rate': lr,
+            'optimizer': 'RGD' if use_rgd else ('RAdam' if use_radam else 'AdamW'),
+            'loss_function': 'QFE' if use_qfe else 'CrossEntropy',
+            'batch_size': BATCH_SIZE,
+            'block_size': BLOCK_SIZE,
+            'd_model': D_MODEL,
+            'num_layers': NUM_LAYERS,
+            'num_heads': NUM_HEADS,
+            'num_waves': NUM_WAVES,
+            'num_harmonics': NUM_HARMONICS
+        }
+        
+        dataset_info = {
+            'dataset': 'tiny_shakespeare',
+            'train_tokens': len(train_data),
+            'split': 0.9
+        }
+        
+        try:
+            config_tracker.save_config(config_dict, model, dataset_info)
+            console.print("✓ Configuration saved")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to save config: {e}[/yellow]")
     
     # Select optimizer
     if use_rgd:
@@ -423,6 +496,7 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
     model.train()
     losses = []
     coherence_losses = []
+    learning_rates = []
     
     console.print("🔥 Warming up...")
     try:
@@ -481,7 +555,58 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
             optimizer.step()
             
             losses.append(loss.item())
+            learning_rates.append(current_lr)
             progress.update(task, advance=1, loss=loss.item())
+            
+            # Log metrics if monitoring enabled
+            if metrics_logger and metrics_logger.should_log(step):
+                try:
+                    metrics_dict = {
+                        'loss': loss.item(),
+                        'learning_rate': current_lr,
+                        'tokens_per_sec': total_tokens / (time.perf_counter() - start_time) if (time.perf_counter() - start_time) > 0 else 0
+                    }
+                    
+                    if use_qfe and coherence_losses:
+                        metrics_dict['coherence_loss'] = coherence_losses[-1]
+                    
+                    metrics_logger.log_metrics(step, metrics_dict)
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to log metrics: {e}[/yellow]")
+            
+            # Save checkpoint if monitoring enabled
+            if checkpoint_manager and checkpoint_manager.should_checkpoint(step):
+                try:
+                    checkpoint_config = {
+                        'model_name': config_name,
+                        'step': step,
+                        'total_steps': num_steps
+                    }
+                    checkpoint_manager.save_checkpoint(
+                        step=step,
+                        model=model,
+                        optimizer=optimizer,
+                        loss_history=losses,
+                        config=checkpoint_config
+                    )
+                    console.print(f"[green]✓ Checkpoint saved at step {step}[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to save checkpoint: {e}[/yellow]")
+            
+            # Generate visualizations if monitoring enabled
+            if viz_manager and viz_manager.should_visualize(step):
+                try:
+                    viz_metrics = {
+                        'learning_rate': learning_rates
+                    }
+                    if coherence_losses:
+                        viz_metrics['coherence_loss'] = coherence_losses
+                    
+                    viz_manager.generate_training_plots(step, losses, viz_metrics)
+                    viz_manager.generate_model_plots(step, model)
+                    console.print(f"[green]✓ Visualizations generated at step {step}[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to generate visualizations: {e}[/yellow]")
             
     # Log every 100 steps
             if (step + 1) % 100 == 0:
@@ -505,6 +630,35 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
     text = tokenizer.decode(generated[0].tolist())
     console.print(Panel(text[:200], title="Generated Text", border_style="green"))
     
+    # Save final results if monitoring enabled
+    if config_tracker:
+        try:
+            final_metrics = {
+                'val_loss': val_loss.item(),
+                'perplexity': torch.exp(val_loss).item(),
+                'total_time_seconds': elapsed,
+                'tokens_per_second': speed,
+                'peak_memory_mb': peak_mem,
+                'total_steps': num_steps,
+                'final_loss': losses[-1] if losses else 0.0
+            }
+            
+            # Find best checkpoint path if available
+            best_checkpoint_path = None
+            if checkpoint_manager:
+                checkpoints = checkpoint_manager.list_checkpoints()
+                if checkpoints:
+                    best_checkpoint_path = checkpoints[-1]['path']
+            
+            config_tracker.save_results(
+                final_metrics=final_metrics,
+                best_checkpoint=best_checkpoint_path,
+                generation_samples=[text[:200]]
+            )
+            console.print("[green]✓ Final results saved[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to save results: {e}[/yellow]")
+    
     return {
         "model": config_name,
         "params": params,
@@ -514,7 +668,8 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
         "time": elapsed,
         "peak_memory": peak_mem,
         "losses": losses,
-        "model_ref": model
+        "model_ref": model,
+        "experiment_dir": experiment_dir if enable_monitoring else None
     }
 
 
@@ -590,6 +745,10 @@ def main():
     from model import SpectralGPT
     from train import GPTConfig
     
+    # Generate experiment ID for monitoring
+    from monitoring import generate_experiment_id
+    classic_exp_id = generate_experiment_id("classic_transformer")
+    
     classic_config = GPTConfig(
         vocab_size=1024, d_model=D_MODEL, num_layers=NUM_LAYERS,
         num_heads=NUM_HEADS, d_ff=D_MODEL*4, block_size=BLOCK_SIZE,
@@ -599,7 +758,8 @@ def main():
     classic_model = SpectralGPT(classic_config).to(DEVICE)
     
     res = run_wave_benchmark("Classic Transformer", classic_model, train_data, console, tokenizer, 
-                             num_steps=CLASSIC_STEPS, lr=CLASSIC_LR, use_radam=False)
+                             num_steps=CLASSIC_STEPS, lr=CLASSIC_LR, use_radam=False,
+                             experiment_dir=classic_exp_id, enable_monitoring=True)
     if res:
         results.append(res)
     
@@ -615,6 +775,9 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     
+    # Generate experiment ID for monitoring
+    wave_exp_id = generate_experiment_id("wave_native_gpt")
+    
     wave_config = WaveGPTConfig(
         vocab_size=1024, d_model=D_MODEL, num_layers=NUM_LAYERS,
         num_heads=NUM_HEADS, num_waves=NUM_WAVES, num_harmonics=NUM_HARMONICS,
@@ -626,7 +789,8 @@ def main():
     res = run_wave_benchmark(
         "Wave-Native GPT 🌊⚡", wave_model, train_data, console, tokenizer, 
         num_steps=WAVE_STEPS, lr=WAVE_LR, 
-        use_radam=False, use_rgd=USE_RGD, use_qfe=USE_QFE
+        use_radam=False, use_rgd=USE_RGD, use_qfe=USE_QFE,
+        experiment_dir=wave_exp_id, enable_monitoring=True
     )
     if res:
         results.append(res)
