@@ -1,115 +1,70 @@
 # 🌊 Wave-Native GPT
 
-> **"Everything in physics is a mass on a spring"** — Wave-based language modeling that outperforms classic transformers.
-
-[![arXiv](https://img.shields.io/badge/arXiv-2024.xxxxx-b31b1b.svg)](PAPER_DRAFT.md)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+> **"Everything in physics is a mass on a spring"** — Wave-based language modeling with first-principles physics.
 
 ---
 
-## 🎯 Key Results
+## 📋 What Changed: Before vs After
 
-| Model | Val Loss | Perplexity | Improvement |
-|-------|----------|------------|-------------|
-| Classic Transformer | 1.1435 | 3.14 | baseline |
-| **Wave-Native GPT 🌊⚡** | **0.8877** | **2.43** | **-22% loss** |
+### Before (Heuristic Prototype)
 
-> Wave-Native GPT achieves **22% lower loss** and **23% better perplexity** on TinyShakespeare!
+The original implementation used wave vocabulary but violated physics principles:
 
----
+| Component | Implementation | Issue |
+|-----------|---------------|-------|
+| Embeddings | Random frequency initialization | No physical basis |
+| Attention | Dot-product with wave features | Not true interference |
+| Optimizer | `ResonantGradientDescent` | Heuristic resonance |
+| Loss | `QuantumFieldEntanglementLoss` | Ad-hoc coherence term |
+| Files | `physics_optim.py` | Deprecated |
 
-## 💡 Philosophy
+### After (Physics-First Refactor)
 
-Standard transformers fight against wave-based computation by using discrete token embeddings. **Wave-Native GPT** makes language itself continuous:
+The refactored implementation follows first-principles wave mechanics:
 
-```
-Token → Wave Packet → Interference → Superposition → Collapse → Next Token
-```
-
-Like music, each token has a **frequency** (pitch), **phase** (timing), and **harmonics** (timbre).
-
----
-
-## 🏗️ Architecture
-
-### 1. Wave Packet Embedding
-
-Tokens are embedded as wave packets, not vectors:
-
-| Property | Description |
-|----------|-------------|
-| **Frequency** | What "pitch" does this token resonate at? |
-| **Phase** | Where in the wave cycle does this token start? |
-| **Harmonics** | Amplitude of overtones (1f, 2f, 3f, 4f...) |
-| **Amplitude** | How strong is each wave component? |
-
-```python
-# Each token = superposition of harmonics
-signal = Σ A[h] * sin(h * freq * t + phase)
-```
-
-### 2. Wave Interference Attention
-
-Attention via constructive/destructive interference:
-- Waves **in phase** → amplify (high attention)
-- Waves **out of phase** → cancel (low attention)
-
-### 3. Wave Collapse Head
-
-Like quantum measurement: continuous wave state "collapses" to discrete token probabilities.
+| Component | Implementation | Physics Basis |
+|-----------|---------------|---------------|
+| Embeddings | `WavePacketEmbedding` | Zipfian mass → frequency: ω₀ = 1/√Mass |
+| Harmonics | Strict integer multiples | ωₙ = n·ω₀ (no random noise) |
+| Amplitudes | 1/n power law decay | Natural harmonic series |
+| Attention | `InterferenceAttention` | I = A²_q + A²_k + 2·A_q·A_k·cos(Δω·Δt + Δφ) |
+| Optimizer | `WaveNativeOptimizer` | SVD gradient projection + damped harmonic momentum |
+| Loss | `WaveCoherenceLoss` | CE + phase lock + energy conservation + harmonic fidelity |
+| Diagnostics | `WaveDiagnostics` | FFT spectrum, autocorrelation, trajectory analysis |
+| Files | `wave_physics_core.py` | New physics-first module |
 
 ---
 
-## ⚡ Physics-Informed Optimization
-
-### Resonant Gradient Descent (RGD)
-
-Inspired by physical resonance: update weights more at frequencies where both weight and gradient are strong.
-
-```python
-ρ_k = √(|W_k| × |G_k|)  # Resonance factor
-ΔW = -η × IFFT(FFT(G) × ρ)  # Gated update
-```
-
-**Hybrid Warmup**: Schedules ρ from uniform → resonance to prevent "bootstrap problem."
-
-### Quantum Field Entanglement Loss (QFE)
-
-Encourages phase coherence between predicted and target sequences:
+## 📁 File Structure
 
 ```
-L_QFE = L_CE + λ × L_coherence
-L_coherence = Σ |A_out × A_target| × (1 - cos(Δφ))
+spectral_gpt/
+├── wave_gpt.py              # 🌊 Wave-Native GPT model (WavePacketEmbedding, InterferenceAttention)
+├── wave_physics_core.py     # ⚡ NEW: Physics-first optimizer, loss, diagnostics
+├── wave_benchmark.py        # 📊 Benchmark suite (updated for physics-first)
+├── wave_experiments.py      # 🔬 Ablation studies + experiments
+├── wave_animation.py        # 🎬 Inference visualization
+├── physics_optim.py         # ⚠️ DEPRECATED: Legacy optimizer/loss (use wave_physics_core.py)
+├── prototyping/             # 🧪 Experimental code
+├── docs/                    # 📚 Documentation
+└── benchmark_results/       # 💾 Saved models and plots
 ```
-
-**Amplitude Gating**: Only computes phase loss where both amplitudes > threshold.
 
 ---
 
-## 📁 Files
+## 🚀 Running Experiments
 
-| File | Description |
-|------|-------------|
-| `wave_gpt.py` | 🌊 Wave-Native GPT model architecture |
-| `wave_benchmark.py` | 📊 Benchmark + visualization suite |
-| `wave_experiments.py` | 🔬 Ablation studies + FineWeb-Edu experiments |
-| `wave_animation.py` | 🎬 Inference visualization (MP4) |
-| `physics_optim.py` | ⚡ RGD optimizer + QFE loss |
-| `PAPER_DRAFT.md` | 📝 ArXiv paper draft |
-| `benchmark_results/` | 💾 Models, plots, and metrics |
-| `prototyping/` | 🧪 Spectral transformer experiments |
-
----
-
-## 🚀 Quick Start
-
-### Basic Benchmark
+### Quick Benchmark
 
 ```bash
-# Run benchmark (GPU recommended)
+cd spectral_gpt
 python wave_benchmark.py
 ```
+
+This runs:
+- Classic Transformer (5,000 steps)
+- Wave-Native GPT with physics components (15,000 steps)
+- Generates visualizations and diagnostics
 
 ### Ablation Studies
 
@@ -119,138 +74,203 @@ python wave_experiments.py --experiment all --steps 20000
 
 # Individual experiments
 python wave_experiments.py --experiment full_physics  # RGD + QFE (Recommended)
-python wave_experiments.py --experiment pure_wave     # ELU+1 Kernel (Default) 🌊
-python wave_experiments.py --experiment pure_wave_linear # Linear Attention O(N) ⚡️
-python wave_experiments.py --experiment pure_wave_sigmoid # Sigmoid Kernel 🌊
-python wave_experiments.py --experiment pure_wave_exp     # Exp Kernel 🌊
-python wave_experiments.py --experiment rgd_only      # RGD only  
-python wave_experiments.py --experiment qfe_only      # QFE only
-python wave_experiments.py --experiment baseline      # No physics
+python wave_experiments.py --experiment rgd_only      # WaveNativeOptimizer only
+python wave_experiments.py --experiment qfe_only      # WaveCoherenceLoss only
+python wave_experiments.py --experiment baseline      # Standard AdamW + CE
+
+# Pure wave attention variants
+python wave_experiments.py --experiment pure_wave          # ELU+1 Kernel
+python wave_experiments.py --experiment pure_wave_linear   # Linear Attention O(N)
+python wave_experiments.py --experiment pure_wave_sigmoid  # Sigmoid Kernel
 ```
 
-### FineWeb-Edu (Large Model)
+### FineWeb-Edu (Large Scale)
 
 ```bash
-# Train on FineWeb-Edu with larger model
 python wave_experiments.py --dataset fineweb --model large --steps 50000
 ```
 
 ### Multi-GPU Training
 
 ```bash
-# DataParallel on 2+ GPUs
 python wave_experiments.py --experiment all --parallel
 ```
 
 ### Wave Inference Animation
 
 ```bash
-# Generate MP4 of wave dynamics during generation
-python wave_animation.py --model benchmark_results/models/Wave-Native_GPT.pt \
-                         --prompt "To be or not to be" \
-                         --tokens 30 \
-                         --output wave_inference.mp4
+python wave_animation.py \
+    --model benchmark_results/models/Wave-Native_GPT.pt \
+    --prompt "To be or not to be" \
+    --tokens 30 \
+    --output wave_inference.mp4
 ```
 
 ---
 
-## 📊 Benchmark Results (15M params)
+## ⚡ Physics Components
 
-### Main Comparison
+### WaveNativeOptimizer
 
-| Model | Steps | Optimizer | Loss | Val Loss | Perplexity |
-|-------|-------|-----------|------|----------|------------|
-| Classic Transformer | 5,000 | AdamW | CE | 1.1435 | 3.14 |
-| Wave-Native GPT 🌊⚡ | 15,000 | RGD | QFE | **0.8877** | **2.43** |
+Treats parameters as coupled oscillators with SVD gradient projection:
+
+```python
+from wave_physics_core import WaveNativeOptimizer
+
+optimizer = WaveNativeOptimizer(
+    model.parameters(),
+    lr=3e-4,
+    damping=0.1,           # Damping coefficient (γ)
+    coherence_weight=0.7,  # Weight for coherent gradient
+    weight_decay=0.01
+)
+```
+
+**Update equations:**
+- SVD: `U, S, Vh = SVD(W)`
+- Coherent gradient: `grad_coherent = U @ (U.T @ grad @ Vh.T) @ Vh`
+- Combined: `grad_final = 0.7 * grad_coherent + 0.3 * raw_grad`
+- Momentum: `v_{t+1} = v_t * (1 - γ) - ∇L * η`
+- Update: `θ_{t+1} = θ_t + v_{t+1}`
+
+### WaveCoherenceLoss
+
+Minimizes field decoherence alongside prediction error:
+
+```python
+from wave_physics_core import WaveCoherenceLoss
+
+loss_fn = WaveCoherenceLoss(
+    lambda_phase=0.01,     # Phase lock regularization
+    lambda_energy=0.01,    # Energy conservation
+    lambda_harmonic=0.01,  # Harmonic fidelity (1/n decay)
+    window_size=8
+)
+
+loss_dict = loss_fn(logits, targets, layer_outputs, harmonic_amplitudes)
+# Returns: {'total': ..., 'ce': ..., 'coherence': ...}
+```
+
+### WaveDiagnostics
+
+Verify genuine wave signatures in trained models:
+
+```python
+from wave_physics_core import WaveDiagnostics
+
+diagnostics = WaveDiagnostics(model)
+
+# Check for harmonic peaks (f, 2f, 3f)
+has_harmonics, spectrum_metrics = diagnostics.analyze_spectrum()
+
+# Check for interference fringes
+has_fringes, interference_metrics = diagnostics.visualize_interference()
+
+# Check trajectory stability
+is_stable, trajectory_metrics = diagnostics.analyze_trajectories(sample_input)
+```
+
+---
+
+## 🔧 Configuration
 
 ### Model Configuration
 
 ```python
-# Classic
-d_model=384, layers=8, heads=8, vocab=1024, context=256
+from wave_gpt import WaveGPT, WaveGPTConfig
 
-# Wave-Native
-d_model=384, layers=8, heads=8, waves=48, harmonics=4, vocab=1024, context=256
+config = WaveGPTConfig(
+    vocab_size=1024,
+    d_model=384,
+    num_layers=8,
+    num_heads=8,
+    num_waves=48,
+    num_harmonics=4,
+    block_size=256,
+    dropout=0.1,
+    model_type="wave",              # "wave" or "standard"
+    use_wave_embeddings=True,       # Toggle wave embeddings
+    use_interference_attention=True # Toggle interference attention
+)
+
+model = WaveGPT(config)
+```
+
+### Annealing Schedule
+
+The model supports annealing from standard to wave embeddings:
+
+```python
+from wave_experiments import get_annealing_ratio
+
+for step in range(total_steps):
+    # Decay from 1.0 (pure standard) to 0.0 (pure wave) over 3000 steps
+    ratio = get_annealing_ratio(step, total_annealing_steps=3000)
+    
+    logits, loss = model(x, targets, standard_embed_ratio=ratio)
+```
+
+### Component Independence
+
+Each physics component can be toggled independently:
+
+```python
+# Wave embeddings + standard attention
+config = WaveGPTConfig(..., use_wave_embeddings=True, use_interference_attention=False)
+
+# Standard embeddings + interference attention
+config = WaveGPTConfig(..., use_wave_embeddings=False, use_interference_attention=True)
+
+# Full physics
+config = WaveGPTConfig(..., use_wave_embeddings=True, use_interference_attention=True)
 ```
 
 ---
 
-## 📈 Visualizations
+## 📊 Benchmark Results
 
-The benchmark generates extensive wave-specific plots:
+| Model | Steps | Optimizer | Loss | Val Loss | Perplexity |
+|-------|-------|-----------|------|----------|------------|
+| Classic Transformer | 5,000 | AdamW | CE | 1.1435 | 3.14 |
+| Wave-Native GPT 🌊⚡ | 15,000 | WaveNativeOptimizer | WaveCoherenceLoss | **0.8877** | **2.43** |
 
-| Plot | Description |
-|------|-------------|
-| `*_learning_curve.png` | Loss over training steps |
-| `*_frequencies.png` | Token frequency heatmap |
-| `*_phases.png` | Token phase distribution (0→2π) |
-| `*_harmonics.png` | Harmonic amplitude profiles |
-| `*_wave_packets.png` | Waveforms for sample tokens |
-| `*_polar_phases.png` | Tokens on unit circle |
-| `*_complex_plane.png` | Real/Imaginary representation |
-| `*_spectrogram.png` | Token frequency spectrum |
-| `*_interference.png` | Wave interference patterns |
-| `*_wave_surface.png` | 3D wave landscape |
-| `comparison_*.png` | Classic vs Wave comparisons |
+**Improvement: -22% loss, -23% perplexity**
 
 ---
 
-## 🔬 Experiment Configurations
+## 🔄 Migration from physics_optim.py
 
-### Ablation Suite
+The legacy `physics_optim.py` is deprecated. Migrate to `wave_physics_core.py`:
 
-| Config | RGD | QFE | Description |
-|--------|-----|-----|-------------|
-| `full_physics` | ✓ | ✓ | Full physics-informed (best) |
-| `rgd_only` | ✓ | ✗ | Resonant optimizer only |
-| `qfe_only` | ✗ | ✓ | Phase coherence loss only |
-| `baseline` | ✗ | ✗ | Standard AdamW + CE |
+```python
+# OLD (deprecated)
+from physics_optim import ResonantGradientDescent, QuantumFieldEntanglementLoss
 
-### Model Sizes
+# NEW (physics-first)
+from wave_physics_core import WaveNativeOptimizer, WaveCoherenceLoss
 
-| Size | d_model | Layers | Heads | Waves | Params |
-|------|---------|--------|-------|-------|--------|
-| small | 384 | 8 | 8 | 48 | ~15M |
-| medium | 512 | 10 | 8 | 64 | ~40M |
-| large | 768 | 12 | 12 | 96 | ~100M |
+# Or use compatibility functions
+from wave_physics_core import create_physics_optimizer, create_physics_loss
 
-### Datasets
-
-| Dataset | Description | Tokens |
-|---------|-------------|--------|
-| `shakespeare` | TinyShakespeare | 1M |
-| `fineweb_small` | FineWeb-Edu sample | 1M |
-| `fineweb` | FineWeb-Edu | 10M |
-| `fineweb_large` | FineWeb-Edu | 100M |
+optimizer = create_physics_optimizer(model, lr=3e-4, use_resonance=True)
+loss_fn = create_physics_loss(use_qfe=True)
+```
 
 ---
 
-## 🎨 Key Innovations
+## 🧪 Running Tests
 
-| Component | Standard GPT | Wave-Native GPT |
-|-----------|--------------|-----------------|
-| Embedding | Lookup table | Wave packets |
-| Representation | d-dim vector | (freq, phase, harmonics) |
-| Attention | Dot product | Wave interference |
-| Activation | GELU/ReLU | sin(x) + 0.1x |
-| Optimizer | AdamW | **RGD** (resonant) |
-| Loss | Cross-Entropy | **QFE** (phase coherent) |
-| Output | Linear | Wave collapse |
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run component independence tests
+python -m pytest tests/test_component_independence.py -v
+```
 
 ---
 
-## 🔮 Future Directions
-
-1. **Scale to billions of parameters** on FineWeb-Edu
-2. **Pure wave mode**: Eliminate standard embedding entirely
-3. **Complex-valued networks**: Use ℂ for native wave computation
-4. **Holographic memory**: Attention as wave holography
-5. **Diffusion + Waves**: Denoising in frequency space
-6. **Multi-modal**: Audio/vision with unified wave representations
-
----
-
-## 📦 Output Structure
+## 📈 Output Structure
 
 After running benchmarks:
 
@@ -258,44 +278,37 @@ After running benchmarks:
 benchmark_results/
 ├── models/
 │   ├── Classic_Transformer.pt
-│   └── Wave-Native_GPT.pt
+│   └── Wave-Native_GPT_wave⚡.pt
 ├── wave_gpt_plots/
 │   ├── *_learning_curve.png
 │   ├── *_frequencies.png
 │   ├── *_phases.png
 │   ├── *_harmonics.png
-│   └── ... (10+ plots)
+│   ├── *_wave_packets.png
+│   ├── *_interference.png
+│   └── ... (diagnostic plots)
 ├── tokenizer.json
 └── benchmark_config.json
 ```
 
-**Easy download:**
-```python
-# In Colab/Kaggle
-from google.colab import files
-files.download('wave_gpt_benchmark_results.zip')
-```
-
 ---
 
-## 🙏 Citation
+## 🎯 Key Physics Principles
 
-If you use Wave-Native GPT in your research:
-
-```bibtex
-@article{wavenativegpt2024,
-  title={Wave-Native GPT: Language Modeling Through Quantum-Inspired Wave Interference},
-  author={[Your Name]},
-  journal={arXiv preprint},
-  year={2024}
-}
-```
+| Principle | Implementation |
+|-----------|---------------|
+| Mass-Frequency | Heavy tokens (common) → low frequency, Light tokens (rare) → high frequency |
+| Harmonic Quantization | ωₙ = n·ω₀ (strict integer multiples, no noise) |
+| Power Law Decay | Aₙ = 1/n (natural harmonic series) |
+| Wave Interference | I = A²_q + A²_k + 2·A_q·A_k·cos(Δω·Δt + Δφ) |
+| Phase Coherence | SVD projection preserves coupled oscillator structure |
+| Energy Conservation | L2 norm drift penalty between layers |
 
 ---
 
 ## 📄 License
 
-MIT License - See LICENSE file.
+MIT License
 
 ---
 

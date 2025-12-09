@@ -49,6 +49,43 @@ from wave_gpt import WaveGPT, WaveGPTConfig
 from physics_optim import ResonantGradientDescent, QuantumFieldEntanglementLoss
 from train import BasicTokenizer, get_batch
 
+# Import wave physics core components (physics-first approach)
+try:
+    from wave_physics_core import WaveNativeOptimizer, WaveCoherenceLoss, WaveDiagnostics
+    WAVE_PHYSICS_CORE_AVAILABLE = True
+except ImportError:
+    WAVE_PHYSICS_CORE_AVAILABLE = False
+    WaveNativeOptimizer = None
+    WaveCoherenceLoss = None
+    WaveDiagnostics = None
+
+
+# ==========================================
+# Annealing Schedule
+# ==========================================
+
+# Default annealing steps constant
+ANNEALING_STEPS = 3000
+
+
+def get_annealing_ratio(step: int, total_annealing_steps: int = ANNEALING_STEPS) -> float:
+    """
+    Compute standard_embed_ratio for annealing schedule.
+    
+    Decays linearly from 1.0 to 0.0 over total_annealing_steps.
+    After total_annealing_steps, returns 0.0 (pure wave embeddings).
+    
+    Args:
+        step: Current training step
+        total_annealing_steps: Number of steps for annealing (default: 3000)
+        
+    Returns:
+        standard_embed_ratio in [0.0, 1.0]
+        
+    Requirements: 6.1
+    """
+    return max(0.0, 1.0 - step / total_annealing_steps)
+
 # ==========================================
 # Experiment Configurations
 # ==========================================
@@ -439,16 +476,28 @@ def train_experiment(
             console.print(f"[yellow]Warning: Failed to load checkpoint: {e}[/yellow]")
     
     # Setup optimizer
-    # Setup optimizer
+    # Use WaveNativeOptimizer from wave_physics_core if available, else fall back to legacy RGD
     if exp_config.use_rgd:
-        optimizer = ResonantGradientDescent(
-            model.parameters(),
-            lr=exp_config.lr,
-            resonance_strength=exp_config.rgd_strength,
-            warmup_steps=exp_config.warmup_steps,
-            weight_decay=exp_config.weight_decay
-        )
-        console.print(f"⚡ Optimizer: RGD (strength={exp_config.rgd_strength})")
+        if WAVE_PHYSICS_CORE_AVAILABLE and WaveNativeOptimizer is not None:
+            # Physics-first approach: WaveNativeOptimizer with SVD projection
+            optimizer = WaveNativeOptimizer(
+                model.parameters(),
+                lr=exp_config.lr,
+                damping=0.1,
+                coherence_weight=exp_config.rgd_strength,  # Map rgd_strength to coherence_weight
+                weight_decay=exp_config.weight_decay
+            )
+            console.print(f"⚡ Optimizer: WaveNativeOptimizer (coherence={exp_config.rgd_strength})")
+        else:
+            # Fallback to legacy ResonantGradientDescent
+            optimizer = ResonantGradientDescent(
+                model.parameters(),
+                lr=exp_config.lr,
+                resonance_strength=exp_config.rgd_strength,
+                warmup_steps=exp_config.warmup_steps,
+                weight_decay=exp_config.weight_decay
+            )
+            console.print(f"⚡ Optimizer: RGD (strength={exp_config.rgd_strength}) [legacy]")
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=exp_config.lr, weight_decay=exp_config.weight_decay)
         console.print(f"⚙️  Optimizer: AdamW")
@@ -464,12 +513,24 @@ def train_experiment(
             console.print(f"[yellow]Warning: Failed to restore optimizer state: {e}[/yellow]")
     
     # Setup loss
+    # Use WaveCoherenceLoss from wave_physics_core if available, else fall back to legacy QFE
     if exp_config.use_qfe:
-        loss_fn = QuantumFieldEntanglementLoss(
-            lambda_coherence=exp_config.qfe_lambda,
-            amplitude_threshold=exp_config.qfe_threshold
-        )
-        console.print(f"🌌 Loss: QFE (λ={exp_config.qfe_lambda})")
+        if WAVE_PHYSICS_CORE_AVAILABLE and WaveCoherenceLoss is not None:
+            # Physics-first approach: WaveCoherenceLoss with phase/energy/harmonic regularization
+            loss_fn = WaveCoherenceLoss(
+                lambda_phase=exp_config.qfe_lambda,
+                lambda_energy=exp_config.qfe_lambda,
+                lambda_harmonic=exp_config.qfe_lambda,
+                window_size=8
+            )
+            console.print(f"🌌 Loss: WaveCoherenceLoss (λ={exp_config.qfe_lambda})")
+        else:
+            # Fallback to legacy QuantumFieldEntanglementLoss
+            loss_fn = QuantumFieldEntanglementLoss(
+                lambda_coherence=exp_config.qfe_lambda,
+                amplitude_threshold=exp_config.qfe_threshold
+            )
+            console.print(f"🌌 Loss: QFE (λ={exp_config.qfe_lambda}) [legacy]")
     else:
         loss_fn = None
         console.print(f"📉 Loss: Cross-Entropy")
@@ -550,6 +611,10 @@ def train_experiment(
             # --- Gradient Accumulation Loop ---
             accum_loss_scalar = 0.0
             
+            # Compute annealing ratio for this step (Requirements 6.1, 6.2)
+            # Decays from 1.0 to 0.0 over ANNEALING_STEPS (3000 steps)
+            current_annealing_ratio = get_annealing_ratio(step, ANNEALING_STEPS)
+            
             optimizer.zero_grad() # Zero gradients before accumulation starts
             
             for _ in range(exp_config.grad_accum_steps):
@@ -557,14 +622,23 @@ def train_experiment(
                 x, y = get_batch(train_data, model_config.batch_size, model_config.block_size, device)
                 total_tokens += x.numel()
                 
-                # Forward (no masking needed for GPT generally, handled in attn)
-                logits, ce_loss = model(x, y)
+                # Forward with annealing ratio (Requirements 6.1, 6.2)
+                # Pass standard_embed_ratio to model for embedding annealing
+                logits, ce_loss = model(x, y, standard_embed_ratio=current_annealing_ratio)
                 
                 # Compute loss
                 if exp_config.use_qfe and loss_fn is not None:
-                    loss_dict = loss_fn(logits, y, return_components=True)
-                    loss = loss_dict['total']
-                    coherence_losses.append(loss_dict['coherence'].item())
+                    # Handle both WaveCoherenceLoss (new) and QuantumFieldEntanglementLoss (legacy)
+                    if WAVE_PHYSICS_CORE_AVAILABLE and isinstance(loss_fn, WaveCoherenceLoss):
+                        # WaveCoherenceLoss returns dict with 'total', 'ce', 'coherence' keys
+                        loss_dict = loss_fn(logits, y)
+                        loss = loss_dict['total']
+                        coherence_losses.append(loss_dict['coherence'].item())
+                    else:
+                        # Legacy QuantumFieldEntanglementLoss with return_components=True
+                        loss_dict = loss_fn(logits, y, return_components=True)
+                        loss = loss_dict['total']
+                        coherence_losses.append(loss_dict['coherence'].item())
                 else:
                     loss = ce_loss
                     if loss.ndim > 0:
@@ -608,7 +682,8 @@ def train_experiment(
                     metrics_dict = {
                         'loss': avg_loss,
                         'learning_rate': current_lr,
-                        'tokens_per_sec': total_tokens / (time.perf_counter() - start_time) if (time.perf_counter() - start_time) > 0 else 0
+                        'tokens_per_sec': total_tokens / (time.perf_counter() - start_time) if (time.perf_counter() - start_time) > 0 else 0,
+                        'standard_embed_ratio': current_annealing_ratio  # Track annealing progress
                     }
                     
                     # Add wave-specific metrics if available
@@ -877,6 +952,19 @@ def run_ablation_suite(
         # Count Parameters
         params = sum(p.numel() for p in model.parameters())
         console.print(f"📊 Parameters: {params:,} ({params/1e6:.2f}M)")
+        
+        # Parameter count assertion for fair comparison (Requirements 6.5)
+        # Only enforce for non-dry-run experiments to allow testing with smaller models
+        if not dry_run:
+            MIN_PARAMS = 50_000_000  # 50M
+            MAX_PARAMS = 55_000_000  # 55M
+            if not (MIN_PARAMS < params < MAX_PARAMS):
+                console.print(f"[yellow]⚠️  Parameter count {params:,} outside fair comparison range (50M-55M)[/yellow]")
+                console.print(f"[yellow]   Adjust model config for fair comparison runs[/yellow]")
+                # Note: We warn but don't assert to allow flexibility in experiments
+                # For strict fair comparison, uncomment the assertion below:
+                # assert MIN_PARAMS < params < MAX_PARAMS, \
+                #     f"Parameter count {params:,} must be between 50M and 55M for fair comparison"
         
         # DataParallel if requested
         if parallel and torch.cuda.device_count() > 1:

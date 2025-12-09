@@ -1,6 +1,29 @@
 """
 Physics-Informed Optimization for Wave-Native GPT
 
+DEPRECATED: This module is deprecated and will be removed in a future version.
+Please migrate to wave_physics_core.py which provides:
+- WaveNativeOptimizer (replaces ResonantGradientDescent)
+- WaveCoherenceLoss (replaces QuantumFieldEntanglementLoss)
+- WaveDiagnostics (new diagnostic tools)
+
+Migration Guide:
+----------------
+Old (physics_optim.py):
+    from physics_optim import ResonantGradientDescent, QuantumFieldEntanglementLoss
+    optimizer = ResonantGradientDescent(model.parameters(), lr=1e-3)
+    loss_fn = QuantumFieldEntanglementLoss(lambda_coherence=0.05)
+
+New (wave_physics_core.py):
+    from wave_physics_core import WaveNativeOptimizer, WaveCoherenceLoss
+    optimizer = WaveNativeOptimizer(model.parameters(), lr=1e-3, coherence_weight=0.7)
+    loss_fn = WaveCoherenceLoss(lambda_phase=0.01, lambda_energy=0.01)
+
+Or use compatibility shims:
+    from wave_physics_core import create_physics_optimizer, create_physics_loss
+    optimizer = create_physics_optimizer(model, lr=1e-3, use_resonance=True)
+    loss_fn = create_physics_loss(use_qfe=True)
+
 Contains:
 1. Resonant Gradient Descent (RGD) - Optimizer that aligns gradient spectrum with weight spectrum
 2. Quantum Field Entanglement Loss (QFE) - Phase coherence loss in frequency domain
@@ -13,7 +36,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft as fft
 import math
+import warnings
 from typing import Optional, Callable, Iterable, Tuple
+
+
+# Module-level deprecation warning
+warnings.warn(
+    "The physics_optim module is deprecated and will be removed in a future version. "
+    "Please migrate to wave_physics_core.py. See module docstring for migration guide.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 # ==========================================
@@ -23,6 +56,19 @@ from typing import Optional, Callable, Iterable, Tuple
 class ResonantGradientDescent(torch.optim.Optimizer):
     """
     Resonant Gradient Descent (RGD): Physics-informed optimizer for wave-based networks.
+    
+    .. deprecated::
+        This class is deprecated. Use :class:`wave_physics_core.WaveNativeOptimizer` instead.
+        
+        Migration example::
+        
+            # Old
+            from physics_optim import ResonantGradientDescent
+            optimizer = ResonantGradientDescent(model.parameters(), lr=1e-3)
+            
+            # New
+            from wave_physics_core import WaveNativeOptimizer
+            optimizer = WaveNativeOptimizer(model.parameters(), lr=1e-3, coherence_weight=0.7)
     
     Key Idea: Update weights more aggressively at frequencies where both the weight 
     AND gradient have significant magnitude (resonance condition).
@@ -56,6 +102,14 @@ class ResonantGradientDescent(torch.optim.Optimizer):
         weight_decay: float = 0.01,
         eps: float = 1e-8
     ):
+        warnings.warn(
+            "ResonantGradientDescent is deprecated and will be removed in a future version. "
+            "Use WaveNativeOptimizer from wave_physics_core instead. "
+            "Example: from wave_physics_core import WaveNativeOptimizer; "
+            "optimizer = WaveNativeOptimizer(params, lr=lr, coherence_weight=0.7)",
+            DeprecationWarning,
+            stacklevel=2
+        )
         defaults = dict(
             lr=lr, 
             betas=betas,
@@ -214,6 +268,19 @@ class QuantumFieldEntanglementLoss(nn.Module):
     """
     Quantum Field Entanglement Loss: Phase coherence in frequency domain.
     
+    .. deprecated::
+        This class is deprecated. Use :class:`wave_physics_core.WaveCoherenceLoss` instead.
+        
+        Migration example::
+        
+            # Old
+            from physics_optim import QuantumFieldEntanglementLoss
+            loss_fn = QuantumFieldEntanglementLoss(lambda_coherence=0.05)
+            
+            # New
+            from wave_physics_core import WaveCoherenceLoss
+            loss_fn = WaveCoherenceLoss(lambda_phase=0.01, lambda_energy=0.01)
+    
     L_QFE = L_error + λ * L_coherence
     
     where L_coherence measures phase alignment between output and target
@@ -239,6 +306,14 @@ class QuantumFieldEntanglementLoss(nn.Module):
         temperature: float = 1.0,
         projection_dim: int = 256
     ):
+        warnings.warn(
+            "QuantumFieldEntanglementLoss is deprecated and will be removed in a future version. "
+            "Use WaveCoherenceLoss from wave_physics_core instead. "
+            "Example: from wave_physics_core import WaveCoherenceLoss; "
+            "loss_fn = WaveCoherenceLoss(lambda_phase=0.01, lambda_energy=0.01)",
+            DeprecationWarning,
+            stacklevel=2
+        )
         super().__init__()
         self.lambda_coherence = lambda_coherence
         self.amplitude_threshold = amplitude_threshold
@@ -384,6 +459,9 @@ def create_physics_optimizer(
     """
     Create optimizer with optional resonance gating.
     
+    .. deprecated::
+        This function is deprecated. Use :func:`wave_physics_core.create_physics_optimizer` instead.
+    
     Args:
         model: Neural network model
         lr: Learning rate
@@ -395,6 +473,12 @@ def create_physics_optimizer(
     Returns:
         Optimizer instance
     """
+    warnings.warn(
+        "create_physics_optimizer from physics_optim is deprecated. "
+        "Use create_physics_optimizer from wave_physics_core instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     if use_resonance:
         return ResonantGradientDescent(
             model.parameters(),
@@ -420,6 +504,9 @@ def create_physics_loss(
     """
     Create loss function with optional QFE coherence term.
     
+    .. deprecated::
+        This function is deprecated. Use :func:`wave_physics_core.create_physics_loss` instead.
+    
     Args:
         use_qfe: Whether to use QFE loss (True) or standard CE (False)
         lambda_coherence: Weight for coherence term
@@ -429,6 +516,12 @@ def create_physics_loss(
     Returns:
         Loss function (callable)
     """
+    warnings.warn(
+        "create_physics_loss from physics_optim is deprecated. "
+        "Use create_physics_loss from wave_physics_core instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     if use_qfe:
         return QuantumFieldEntanglementLoss(
             lambda_coherence=lambda_coherence,

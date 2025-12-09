@@ -32,7 +32,31 @@ from rich.table import Table
 
 from wave_gpt import WaveGPT, WaveGPTConfig
 from train import BasicTokenizer, get_batch  # From prototyping/
-from physics_optim import ResonantGradientDescent, QuantumFieldEntanglementLoss
+
+# Physics-first imports with backward compatibility
+try:
+    from wave_physics_core import (
+        WaveNativeOptimizer,
+        WaveCoherenceLoss,
+        WaveDiagnostics,
+        create_physics_optimizer,
+        create_physics_loss
+    )
+    PHYSICS_CORE_AVAILABLE = True
+except ImportError:
+    PHYSICS_CORE_AVAILABLE = False
+    WaveNativeOptimizer = None
+    WaveCoherenceLoss = None
+    WaveDiagnostics = None
+
+# Legacy imports for backward compatibility
+try:
+    from physics_optim import ResonantGradientDescent, QuantumFieldEntanglementLoss
+    LEGACY_PHYSICS_AVAILABLE = True
+except ImportError:
+    LEGACY_PHYSICS_AVAILABLE = False
+    ResonantGradientDescent = None
+    QuantumFieldEntanglementLoss = None
 
 # Config - SCALED UP for 16GB GPU (using ~12GB now)
 CLASSIC_STEPS = 5000  # Steps for Classic Transformer
@@ -52,13 +76,16 @@ WARMUP_STEPS = 300    # Warmup for stability
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # ⚡ Physics-Informed Optimization Flags
-USE_RGD = True        # Resonant Gradient Descent for Wave model
-RGD_STRENGTH = 0.3    # Resonance gating strength (0=off, 1=full)
-RGD_WARMUP = 500      # Steps to gradually enable resonance
+USE_RGD = True        # WaveNativeOptimizer (physics-first) for Wave model
+RGD_STRENGTH = 0.3    # Coherence weight for SVD gradient projection (0=off, 1=full)
+RGD_WARMUP = 500      # Steps to gradually enable resonance (legacy compatibility)
 
-USE_QFE = True        # Quantum Field Entanglement Loss for Wave model
+USE_QFE = True        # WaveCoherenceLoss (physics-first) for Wave model
 QFE_LAMBDA = 0.05     # Weight for phase coherence term (start small!)
-QFE_THRESHOLD = 0.01  # Amplitude threshold for phase computation
+QFE_THRESHOLD = 0.01  # Amplitude threshold for phase computation (legacy compatibility)
+
+# Annealing schedule for wave embeddings
+ANNEALING_STEPS = 3000  # Steps to decay standard_embed_ratio from 1.0 to 0.0
 
 
 def get_gpu_memory():
@@ -370,6 +397,107 @@ def save_wave_visualizations(model, losses, name, save_dir):
         ax.set_title('Token Wave Landscape')
         plt.savefig(f"{save_dir}/{name.replace(' ', '_')}_wave_surface.png", dpi=150, bbox_inches='tight')
         plt.close()
+        
+        # 12. FFT SPECTRUM ANALYSIS (Diagnostic Plot)
+        # Shows harmonic peaks in the frequency domain
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        # Compute FFT of embeddings
+        embeddings_flat = model.embedding.simple_embed.weight.data.cpu().numpy() if hasattr(model.embedding, 'simple_embed') else None
+        if embeddings_flat is not None:
+            fft_result = np.fft.rfft(embeddings_flat, axis=-1)
+            magnitudes = np.abs(fft_result)
+            avg_spectrum = magnitudes.mean(axis=0)
+            
+            # Plot average spectrum
+            axes[0].plot(avg_spectrum, color='cyan', linewidth=1.5)
+            axes[0].fill_between(range(len(avg_spectrum)), avg_spectrum, alpha=0.3, color='cyan')
+            axes[0].set_xlabel('Frequency Index')
+            axes[0].set_ylabel('Magnitude')
+            axes[0].set_title('FFT Spectrum (Harmonic Peak Detection)')
+            axes[0].grid(True, alpha=0.3)
+            
+            # Find and mark peaks
+            threshold = avg_spectrum.mean() + 0.5 * avg_spectrum.std()
+            peaks = []
+            for i in range(1, len(avg_spectrum) - 1):
+                if avg_spectrum[i] > avg_spectrum[i-1] and avg_spectrum[i] > avg_spectrum[i+1]:
+                    if avg_spectrum[i] > threshold:
+                        peaks.append(i)
+                        axes[0].axvline(x=i, color='magenta', linestyle='--', alpha=0.5)
+            
+            # Spectrum heatmap per token
+            im = axes[1].imshow(magnitudes[:100].T, aspect='auto', cmap='magma', origin='lower')
+            axes[1].set_xlabel('Token ID (first 100)')
+            axes[1].set_ylabel('Frequency Index')
+            axes[1].set_title('Per-Token Frequency Spectrum')
+            plt.colorbar(im, ax=axes[1], label='Magnitude')
+        
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/{name.replace(' ', '_')}_fft_spectrum.png", dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # 13. AUTOCORRELATION PLOT (Interference Fringes Detection)
+        fig, ax = plt.subplots(figsize=(10, 4))
+        
+        # Compute autocorrelation of wave patterns
+        sample_waves = np.zeros((100, 300))
+        t = np.linspace(0, 4*np.pi, 300)
+        for tok_id in range(100):
+            for w in range(min(4, freqs.shape[1])):
+                for h in range(harm_amps.shape[2]):
+                    f = freqs[tok_id, w] * (h + 1)
+                    p = phases[tok_id, w]
+                    a = harm_amps[tok_id, w, h]
+                    sample_waves[tok_id] += a * np.sin(f * t + p)
+        
+        # Compute average autocorrelation
+        autocorr_sum = np.zeros(300)
+        for wave in sample_waves:
+            wave_centered = wave - wave.mean()
+            autocorr = np.correlate(wave_centered, wave_centered, mode='full')
+            autocorr = autocorr[len(autocorr)//2:]
+            autocorr = autocorr / (autocorr[0] + 1e-8)
+            autocorr_sum += autocorr
+        autocorr_avg = autocorr_sum / len(sample_waves)
+        
+        ax.plot(autocorr_avg, color='yellow', linewidth=1.5)
+        ax.fill_between(range(len(autocorr_avg)), autocorr_avg, alpha=0.3, color='yellow')
+        ax.set_xlabel('Lag')
+        ax.set_ylabel('Autocorrelation')
+        ax.set_title('Autocorrelation (Interference Fringe Detection)')
+        ax.axhline(0, color='white', alpha=0.3)
+        ax.grid(True, alpha=0.3)
+        
+        plt.savefig(f"{save_dir}/{name.replace(' ', '_')}_autocorrelation.png", dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # 14. TRAJECTORY STABILITY PLOT
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Plot norm evolution across tokens
+        norms = np.linalg.norm(sample_waves, axis=1)
+        axes[0].plot(norms, color='green', linewidth=1.5)
+        axes[0].fill_between(range(len(norms)), norms, alpha=0.3, color='green')
+        axes[0].set_xlabel('Token ID')
+        axes[0].set_ylabel('Wave Norm')
+        axes[0].set_title('Wave Norm per Token (Trajectory Stability)')
+        axes[0].axhline(norms.mean(), color='magenta', linestyle='--', label=f'Mean: {norms.mean():.2f}')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # Plot norm distribution
+        axes[1].hist(norms, bins=30, color='green', alpha=0.7, edgecolor='white')
+        axes[1].set_xlabel('Wave Norm')
+        axes[1].set_ylabel('Count')
+        axes[1].set_title('Norm Distribution (Bounded = Stable)')
+        axes[1].axvline(norms.mean(), color='magenta', linestyle='--', linewidth=2, label=f'Mean: {norms.mean():.2f}')
+        axes[1].axvline(norms.mean() + 2*norms.std(), color='red', linestyle=':', label=f'+2σ: {norms.mean() + 2*norms.std():.2f}')
+        axes[1].legend()
+        
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/{name.replace(' ', '_')}_trajectory_stability.png", dpi=150, bbox_inches='tight')
+        plt.close()
 
 def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_steps=5000, lr=3e-4, 
                         use_radam=False, use_rgd=False, use_qfe=False, experiment_dir=None, enable_monitoring=True):
@@ -455,15 +583,33 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
     
     # Select optimizer
     if use_rgd:
-        optimizer_name = "⚡RGD"
-        optimizer = ResonantGradientDescent(
-            model.parameters(), 
-            lr=lr, 
-            resonance_strength=RGD_STRENGTH,
-            warmup_steps=RGD_WARMUP,
-            weight_decay=0.01
-        )
-        console.print(f"⚙️  Optimizer: [bold magenta]{optimizer_name}[/bold magenta] (strength={RGD_STRENGTH}, warmup={RGD_WARMUP})")
+        # Use physics-first WaveNativeOptimizer if available
+        if PHYSICS_CORE_AVAILABLE and WaveNativeOptimizer is not None:
+            optimizer_name = "⚡WaveNative"
+            optimizer = WaveNativeOptimizer(
+                model.parameters(), 
+                lr=lr, 
+                coherence_weight=RGD_STRENGTH,
+                damping=0.1,
+                weight_decay=0.01
+            )
+            console.print(f"⚙️  Optimizer: [bold magenta]{optimizer_name}[/bold magenta] (coherence={RGD_STRENGTH}, damping=0.1)")
+        elif LEGACY_PHYSICS_AVAILABLE and ResonantGradientDescent is not None:
+            # Fall back to legacy ResonantGradientDescent
+            optimizer_name = "⚡RGD (legacy)"
+            optimizer = ResonantGradientDescent(
+                model.parameters(), 
+                lr=lr, 
+                resonance_strength=RGD_STRENGTH,
+                warmup_steps=RGD_WARMUP,
+                weight_decay=0.01
+            )
+            console.print(f"⚙️  Optimizer: [bold magenta]{optimizer_name}[/bold magenta] (strength={RGD_STRENGTH}, warmup={RGD_WARMUP})")
+        else:
+            # No physics optimizer available, fall back to AdamW
+            optimizer_name = "AdamW (fallback)"
+            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+            console.print(f"⚙️  Optimizer: [bold yellow]{optimizer_name}[/bold yellow] (physics optimizers unavailable)")
     elif use_radam:
         optimizer_name = "RAdam"
         optimizer = torch.optim.RAdam(model.parameters(), lr=lr, weight_decay=0.01)
@@ -477,11 +623,25 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
     
     # Select loss function
     if use_qfe:
-        loss_fn = QuantumFieldEntanglementLoss(
-            lambda_coherence=QFE_LAMBDA,
-            amplitude_threshold=QFE_THRESHOLD
-        )
-        console.print(f"🌌 Loss: [bold magenta]QFE[/bold magenta] (λ={QFE_LAMBDA}, threshold={QFE_THRESHOLD})")
+        # Use physics-first WaveCoherenceLoss if available
+        if PHYSICS_CORE_AVAILABLE and WaveCoherenceLoss is not None:
+            loss_fn = WaveCoherenceLoss(
+                lambda_phase=QFE_LAMBDA,
+                lambda_energy=QFE_LAMBDA,
+                lambda_harmonic=QFE_LAMBDA
+            )
+            console.print(f"🌌 Loss: [bold magenta]WaveCoherence[/bold magenta] (λ_phase={QFE_LAMBDA}, λ_energy={QFE_LAMBDA})")
+        elif LEGACY_PHYSICS_AVAILABLE and QuantumFieldEntanglementLoss is not None:
+            # Fall back to legacy QuantumFieldEntanglementLoss
+            loss_fn = QuantumFieldEntanglementLoss(
+                lambda_coherence=QFE_LAMBDA,
+                amplitude_threshold=QFE_THRESHOLD
+            )
+            console.print(f"🌌 Loss: [bold magenta]QFE (legacy)[/bold magenta] (λ={QFE_LAMBDA}, threshold={QFE_THRESHOLD})")
+        else:
+            # No physics loss available, fall back to None (use model's CE)
+            loss_fn = None
+            console.print(f"📉 Loss: [bold yellow]Cross-Entropy (fallback)[/bold yellow] (physics losses unavailable)")
     else:
         loss_fn = None  # Use model's built-in CE loss
         console.print(f"📉 Loss: [bold]Cross-Entropy[/bold]")
@@ -532,14 +692,33 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
             x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE, DEVICE)
             total_tokens += x.numel()
             
-            # Forward
-            logits, ce_loss = model(x, y)
+            # Compute annealing ratio for wave embeddings
+            # Decays linearly from 1.0 to 0.0 over ANNEALING_STEPS
+            standard_embed_ratio = max(0.0, 1.0 - step / ANNEALING_STEPS)
             
-            # Compute loss (QFE or standard CE)
+            # Forward pass with annealing support
+            # Check if model supports standard_embed_ratio parameter
+            if hasattr(model, 'embedding') and hasattr(model.embedding, 'forward'):
+                try:
+                    logits, ce_loss = model(x, y, standard_embed_ratio=standard_embed_ratio)
+                except TypeError:
+                    # Model doesn't support standard_embed_ratio, use default
+                    logits, ce_loss = model(x, y)
+            else:
+                logits, ce_loss = model(x, y)
+            
+            # Compute loss (WaveCoherenceLoss or standard CE)
             if use_qfe and loss_fn is not None:
-                loss_dict = loss_fn(logits, y, return_components=True)
-                loss = loss_dict['total']
-                coherence_losses.append(loss_dict['coherence'].item())
+                # Check if using new WaveCoherenceLoss (returns dict) or legacy QFE
+                if PHYSICS_CORE_AVAILABLE and isinstance(loss_fn, WaveCoherenceLoss):
+                    loss_dict = loss_fn(logits, y)
+                    loss = loss_dict['total']
+                    coherence_losses.append(loss_dict['coherence'].item())
+                else:
+                    # Legacy QFE loss
+                    loss_dict = loss_fn(logits, y, return_components=True)
+                    loss = loss_dict['total']
+                    coherence_losses.append(loss_dict['coherence'].item())
             else:
                 loss = ce_loss
             
@@ -564,7 +743,8 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
                     metrics_dict = {
                         'loss': loss.item(),
                         'learning_rate': current_lr,
-                        'tokens_per_sec': total_tokens / (time.perf_counter() - start_time) if (time.perf_counter() - start_time) > 0 else 0
+                        'tokens_per_sec': total_tokens / (time.perf_counter() - start_time) if (time.perf_counter() - start_time) > 0 else 0,
+                        'standard_embed_ratio': standard_embed_ratio
                     }
                     
                     if use_qfe and coherence_losses:
@@ -630,6 +810,46 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
     text = tokenizer.decode(generated[0].tolist())
     console.print(Panel(text[:200], title="Generated Text", border_style="green"))
     
+    # Run WaveDiagnostics to verify wave signatures (physics-first validation)
+    diagnostics_results = None
+    if PHYSICS_CORE_AVAILABLE and WaveDiagnostics is not None:
+        console.print("\n🔬 Running Wave Diagnostics...")
+        try:
+            diagnostics = WaveDiagnostics(model)
+            
+            # Analyze spectrum for harmonic peaks
+            has_harmonics, spectrum_metrics = diagnostics.analyze_spectrum()
+            console.print(f"  📊 Harmonic Peaks: {'[green]✓[/green]' if has_harmonics else '[yellow]✗[/yellow]'}")
+            console.print(f"     Num peaks: {spectrum_metrics.get('num_peaks', 0)}")
+            if spectrum_metrics.get('harmonic_ratios'):
+                console.print(f"     Harmonic ratios: {spectrum_metrics['harmonic_ratios'][:3]}")
+            
+            # Visualize interference for periodic fringes
+            has_fringes, interference_metrics = diagnostics.visualize_interference()
+            console.print(f"  🌊 Interference Fringes: {'[green]✓[/green]' if has_fringes else '[yellow]✗[/yellow]'}")
+            if interference_metrics.get('fringe_period', 0) > 0:
+                console.print(f"     Fringe period: {interference_metrics['fringe_period']:.2f}")
+            
+            # Analyze trajectories for stable orbits
+            sample_input = torch.randint(0, model.config.vocab_size, (1, 32), device=DEVICE)
+            is_stable, trajectory_metrics = diagnostics.analyze_trajectories(sample_input)
+            console.print(f"  🎯 Trajectory Stability: {'[green]✓[/green]' if is_stable else '[yellow]✗[/yellow]'}")
+            console.print(f"     Lyapunov exponent: {trajectory_metrics.get('lyapunov_exponent', 'N/A'):.4f}")
+            console.print(f"     Norm ratio: {trajectory_metrics.get('norm_ratio', 'N/A'):.2f}")
+            
+            diagnostics_results = {
+                'has_harmonics': has_harmonics,
+                'spectrum_metrics': spectrum_metrics,
+                'has_fringes': has_fringes,
+                'interference_metrics': interference_metrics,
+                'is_stable': is_stable,
+                'trajectory_metrics': trajectory_metrics
+            }
+            
+            console.print("[green]✓ Wave diagnostics complete[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Wave diagnostics failed: {e}[/yellow]")
+    
     # Save final results if monitoring enabled
     if config_tracker:
         try:
@@ -642,6 +862,15 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
                 'total_steps': num_steps,
                 'final_loss': losses[-1] if losses else 0.0
             }
+            
+            # Add diagnostics results if available
+            if diagnostics_results:
+                final_metrics['diagnostics'] = {
+                    'has_harmonics': diagnostics_results.get('has_harmonics', False),
+                    'has_fringes': diagnostics_results.get('has_fringes', False),
+                    'is_stable': diagnostics_results.get('is_stable', False),
+                    'lyapunov_exponent': diagnostics_results.get('trajectory_metrics', {}).get('lyapunov_exponent', None)
+                }
             
             # Find best checkpoint path if available
             best_checkpoint_path = None
@@ -669,7 +898,8 @@ def run_wave_benchmark(config_name, model, train_data, console, tokenizer, num_s
         "peak_memory": peak_mem,
         "losses": losses,
         "model_ref": model,
-        "experiment_dir": experiment_dir if enable_monitoring else None
+        "experiment_dir": experiment_dir if enable_monitoring else None,
+        "diagnostics": diagnostics_results
     }
 
 
