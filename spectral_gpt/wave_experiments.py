@@ -149,6 +149,7 @@ class ExperimentConfig:
     wave_ratio_schedule: bool = True  # Schedule wave_ratio from 0.5 to 0.9
     model_type: str = "wave" # "wave" or "standard"
     grad_accum_steps: int = 2 # Restore effective B=32 (since physical B=16)
+    batch_size_override: int = None  # Override batch size (for memory-heavy experiments like InterferenceAttention)
 
 
 
@@ -302,7 +303,9 @@ ABLATION_EXPERIMENTS = {
         model_type="wave",
         use_rgd=False, use_qfe=False,
         use_interference_attention=True,  # True physics-based attention!
-        lr=6e-4, dropout=0.1
+        lr=6e-4, dropout=0.1,
+        batch_size_override=4,  # Smaller batch - InterferenceAttention uses more memory
+        grad_accum_steps=8  # Compensate: effective batch = 4 * 8 = 32
     ),
     
     # Wave Embeddings + InterferenceAttention + WaveOptim (full physics attention)
@@ -312,7 +315,9 @@ ABLATION_EXPERIMENTS = {
         use_rgd=True, use_qfe=True,
         use_interference_attention=True,
         lr=1e-3, dropout=0.0,
-        qfe_lambda=0.1
+        qfe_lambda=0.1,
+        batch_size_override=4,  # Smaller batch - InterferenceAttention uses more memory
+        grad_accum_steps=8  # Compensate: effective batch = 4 * 8 = 32
     ),
 
     # ============================================================
@@ -366,7 +371,8 @@ ABLATION_EXPERIMENTS = {
         model_type="wave",
         use_rgd=False, use_qfe=False,
         use_interference_attention=True,
-        lr=6e-4, dropout=0.1
+        lr=6e-4, dropout=0.1,
+        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
     ),
     
     # Grid 6: Wave Embed + Interference Attn + WaveOptim
@@ -375,7 +381,8 @@ ABLATION_EXPERIMENTS = {
         model_type="wave",
         use_rgd=True, use_qfe=False,
         use_interference_attention=True,
-        lr=1e-3, dropout=0.1
+        lr=1e-3, dropout=0.1,
+        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
     ),
     
     # Grid 7: Wave Embed + Interference Attn + AdamW + QFE
@@ -385,7 +392,8 @@ ABLATION_EXPERIMENTS = {
         use_rgd=False, use_qfe=True,
         use_interference_attention=True,
         lr=6e-4, dropout=0.1,
-        qfe_lambda=0.05
+        qfe_lambda=0.05,
+        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
     ),
     
     # Grid 8: Wave Embed + Interference Attn + WaveOptim + QFE (FULL PHYSICS)
@@ -395,7 +403,8 @@ ABLATION_EXPERIMENTS = {
         use_rgd=True, use_qfe=True,
         use_interference_attention=True,
         lr=1e-3, dropout=0.0,
-        qfe_lambda=0.1
+        qfe_lambda=0.1,
+        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
     ),
 }
 
@@ -540,6 +549,11 @@ def train_experiment(
     """Train a single experiment configuration with optional monitoring"""
     
     console.print(Panel(f"[bold cyan]{exp_config.name}[/bold cyan]", border_style="cyan"))
+    
+    # Use batch_size_override if set (for memory-heavy experiments like InterferenceAttention)
+    batch_size = getattr(exp_config, 'batch_size_override', None) or model_config.batch_size
+    if batch_size != model_config.batch_size:
+        console.print(f"[yellow]⚠️  Using reduced batch_size={batch_size} (override for memory)[/yellow]")
     
     params = sum(p.numel() for p in model.parameters())
     console.print(f"📊 Parameters: {params:,} ({params/1e6:.2f}M)")
@@ -807,7 +821,7 @@ def train_experiment(
             
             for _ in range(exp_config.grad_accum_steps):
                 # Get batch
-                x, y = get_batch(train_data, model_config.batch_size, model_config.block_size, device)
+                x, y = get_batch(train_data, batch_size, model_config.block_size, device)
                 total_tokens += x.numel()
                 
                 # Forward with annealing ratio (Requirements 6.1, 6.2)
@@ -916,7 +930,7 @@ def train_experiment(
                 num_val_batches = 20 # Robust multi-batch validation
                 with torch.no_grad():
                     for _ in range(num_val_batches):
-                        val_x, val_y = get_batch(val_data, model_config.batch_size, model_config.block_size, device) 
+                        val_x, val_y = get_batch(val_data, batch_size, model_config.block_size, device) 
                         _, val_loss_check = model(val_x, val_y)
                         if val_loss_check.ndim > 0:
                             val_loss_check = val_loss_check.mean()
@@ -962,7 +976,7 @@ def train_experiment(
     # Final eval
     model.eval()
     with torch.no_grad():
-        x, y = get_batch(val_data, model_config.batch_size, model_config.block_size, device)
+        x, y = get_batch(val_data, batch_size, model_config.block_size, device)
         _, val_loss = model(x, y)
         if val_loss.ndim > 0: val_loss = val_loss.mean()
             

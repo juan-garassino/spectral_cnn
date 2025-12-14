@@ -5,7 +5,7 @@
 | Component | Options | Description |
 |-----------|---------|-------------|
 | **Embeddings** | Standard / Wave | Standard = lookup table, Wave = physics-based (ω₀ = 1/√Mass) |
-| **Attention** | Hybrid / Interference | Hybrid = softmax, Interference = energy normalization (I = A²+A²+2AA·cos(Δφ)) |
+| **Attention** | Standard / Hybrid / Interference | Standard = vanilla GPT-2 (Q·K softmax), Hybrid = wave interference + softmax, Interference = energy normalization (I = A²+A²+2AA·cos(Δφ)) |
 | **Optimizer** | AdamW / WaveOpt | AdamW = standard, WaveOpt = parameter-specific masses + resonance damping |
 | **Loss** | CE / QFE | CE = CrossEntropy, QFE = + phase/energy/harmonic regularization |
 
@@ -22,15 +22,15 @@ Each experiment is **one point** in the grid. Running all experiments together f
                         └─────────────────────────────────────────────────┘
 
                                       Attention
-                              Hybrid          Interference
-                           ┌──────────────┬──────────────────┐
-              Standard     │ standard_    │       N/A        │
-Embeddings                 │ transformer  │  (std + interf   │
-                           │              │   not tested)    │
-                           ├──────────────┼──────────────────┤
-              Wave         │ wave_        │ interference_    │
-                           │ baseline     │ attention        │
-                           └──────────────┴──────────────────┘
+                          Standard        Hybrid          Interference
+                        (GPT-2 Q·K)    (wave+softmax)   (energy norm)
+                       ┌────────────┬──────────────┬──────────────────┐
+          Standard     │ standard_  │     N/A      │       N/A        │
+Embeddings (lookup)    │ transformer│              │                  │
+                       ├────────────┼──────────────┼──────────────────┤
+          Wave         │    N/A     │ wave_        │ interference_    │
+          (physics)    │            │ baseline     │ attention        │
+                       └────────────┴──────────────┴──────────────────┘
 
                                       Optimizer
                               AdamW           WaveOpt
@@ -51,7 +51,7 @@ Loss                       │ baseline     │                  │
 
 | Experiment | Embed | Attention | Optimizer | Loss | What It Tests |
 |------------|-------|-----------|-----------|------|---------------|
-| `standard_transformer` | Std | Hybrid | AdamW | CE | **CONTROL** - Pure GPT-2 baseline |
+| `standard_transformer` | Std | **Standard (GPT-2)** | AdamW | CE | **CONTROL** - Pure GPT-2 baseline |
 | `wave_baseline` | Wave | Hybrid | AdamW | CE | Do wave embeddings help? |
 | `interference_attention` | Wave | **Interference** | AdamW | CE | Does physics attention help? |
 | `rgd_only` | Wave | Hybrid | WaveOpt | CE | Does physics optimizer help? |
