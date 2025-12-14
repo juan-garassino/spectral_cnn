@@ -11,6 +11,42 @@
 
 ---
 
+## How the Grid Works
+
+Each experiment is **one point** in the grid. Running all experiments together forms a complete ablation study.
+
+```
+                        ┌─────────────────────────────────────────────────┐
+                        │              EXPERIMENT GRID                     │
+                        │         (Each cell = 1 experiment)               │
+                        └─────────────────────────────────────────────────┘
+
+                                      Attention
+                              Hybrid          Interference
+                           ┌──────────────┬──────────────────┐
+              Standard     │ standard_    │       N/A        │
+Embeddings                 │ transformer  │  (std + interf   │
+                           │              │   not tested)    │
+                           ├──────────────┼──────────────────┤
+              Wave         │ wave_        │ interference_    │
+                           │ baseline     │ attention        │
+                           └──────────────┴──────────────────┘
+
+                                      Optimizer
+                              AdamW           WaveOpt
+                           ┌──────────────┬──────────────────┐
+              CE Loss      │ wave_        │ rgd_only         │
+Loss                       │ baseline     │                  │
+                           ├──────────────┼──────────────────┤
+              QFE Loss     │ qfe_only     │ full_physics     │
+                           │              │                  │
+                           └──────────────┴──────────────────┘
+```
+
+**To run the full grid:** Run each experiment individually. Together they form the complete ablation study.
+
+---
+
 ## Experiment Matrix
 
 | Experiment | Embed | Attention | Optimizer | Loss | What It Tests |
@@ -20,7 +56,7 @@
 | `interference_attention` | Wave | **Interference** | AdamW | CE | Does physics attention help? |
 | `rgd_only` | Wave | Hybrid | WaveOpt | CE | Does physics optimizer help? |
 | `qfe_only` | Wave | Hybrid | AdamW | QFE | Does coherence loss help? |
-| `full_physics` | Wave | Hybrid | WaveOpt | QFE | Full wave stack (no interference attn) |
+| `full_physics` | Wave | Hybrid | WaveOpt | QFE | Full wave stack (hybrid attention) |
 | `interference_full` | Wave | **Interference** | WaveOpt | QFE | **FULL PHYSICS** - Everything wave |
 
 ---
@@ -87,8 +123,8 @@ python wave_experiments.py --experiment interference_attention --dataset fineweb
 # Run comparison pair
 python wave_experiments.py --experiment standard_transformer wave_baseline --dataset fineweb --steps 10000
 
-# Run all core experiments
-python wave_experiments.py --experiment standard_transformer wave_baseline interference_attention rgd_only qfe_only full_physics --dataset fineweb --steps 10000
+# Run all core experiments (the full grid)
+python wave_experiments.py --experiment standard_transformer wave_baseline interference_attention rgd_only qfe_only full_physics interference_full --dataset fineweb --steps 10000
 ```
 
 ---
