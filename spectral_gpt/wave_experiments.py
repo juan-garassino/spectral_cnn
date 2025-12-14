@@ -153,50 +153,69 @@ class ExperimentConfig:
 
 
 ABLATION_EXPERIMENTS = {
-    # 1. Standard Transformer (TRUE Control)
-    "standard_transformer": ExperimentConfig(
-        name="Standard Transformer (GPT-2)",
+    # ============================================================
+    # CORE ABLATION MATRIX (2x2 grid: Embeddings × Optimizer)
+    # ============================================================
+    
+    # Control: Standard Embeddings + AdamW
+    "std_emb_adamw": ExperimentConfig(
+        name="StdEmbed + AdamW (Control)",
         model_type="standard",
         use_rgd=False, use_qfe=False,
         lr=6e-4, dropout=0.1
     ),
-
-    # 2. Wave Baseline (Architecture Check)
-    "wave_baseline": ExperimentConfig(
-        name="Wave Baseline (AdamW + CE)",
+    
+    # Test A: Wave Embeddings + AdamW (isolates embedding effect)
+    "wave_emb_adamw": ExperimentConfig(
+        name="WaveEmbed + AdamW",
         model_type="wave",
         use_rgd=False, use_qfe=False,
-        lr=6e-4, dropout=0.1  # Standard NanoGPT settings (0.1)
+        lr=6e-4, dropout=0.1
     ),
     
-    # 3. RGD Only (Aggressive Test)
-    "rgd_only": ExperimentConfig(
-        name="RGD Only",
+    # Test B: Standard Embeddings + WaveOptim (isolates optimizer effect)
+    "std_emb_waveopt": ExperimentConfig(
+        name="StdEmbed + WaveOptim",
+        model_type="standard",
+        use_rgd=True, use_qfe=False,
+        lr=1e-3, dropout=0.1
+    ),
+    
+    # Test C: Wave Embeddings + WaveOptim (full wave stack)
+    "wave_emb_waveopt": ExperimentConfig(
+        name="WaveEmbed + WaveOptim",
         model_type="wave",
         use_rgd=True, use_qfe=False,
         lr=1e-3, dropout=0.1
     ),
     
-    # 4. Full Physics (RGD + QFE + Aggressive)
-    "full_physics": ExperimentConfig(
-        name="Full Physics (RGD + QFE)",
-        model_type="wave",
-        use_rgd=True, use_qfe=True,
-        lr=1e-3, dropout=0.0, # NO DROPOUT - rely on QFE
-        qfe_lambda=0.1        # Stronger QFE
-    ),
+    # ============================================================
+    # QFE LOSS ABLATIONS (adds coherence regularization)
+    # ============================================================
     
-    # 5. QFE Only
-    "qfe_only": ExperimentConfig(
-        name="QFE Only", 
+    # Wave + AdamW + QFE Loss
+    "wave_emb_adamw_qfe": ExperimentConfig(
+        name="WaveEmbed + AdamW + QFE",
         model_type="wave",
         use_rgd=False, use_qfe=True,
         lr=6e-4, dropout=0.1
     ),
-
-    # 6. Pure Wave Variants (Inherit Physics Settings: RGD=True)
-    "pure_wave": ExperimentConfig(
-        name="Pure Wave (ELU+1) 🌊",
+    
+    # Full Physics: Wave + WaveOptim + QFE (maximum wave)
+    "wave_full_physics": ExperimentConfig(
+        name="WaveEmbed + WaveOptim + QFE (Full)",
+        model_type="wave",
+        use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.0,
+        qfe_lambda=0.1
+    ),
+    
+    # ============================================================
+    # PURE WAVE ATTENTION VARIANTS (no softmax)
+    # ============================================================
+    
+    "pure_wave_elu": ExperimentConfig(
+        name="PureWaveAttn (ELU+1)",
         model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
@@ -204,7 +223,7 @@ ABLATION_EXPERIMENTS = {
         pure_wave_kernel="elu_plus_one"
     ),
     "pure_wave_linear": ExperimentConfig(
-        name="Pure Wave (Linear O(N)) ⚡️",
+        name="PureWaveAttn (Linear O(N))",
         model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
@@ -213,7 +232,7 @@ ABLATION_EXPERIMENTS = {
         pure_wave_mode="linear"
     ),
     "pure_wave_sigmoid": ExperimentConfig(
-        name="Pure Wave (Sigmoid) 🌊",
+        name="PureWaveAttn (Sigmoid)",
         model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
@@ -221,12 +240,55 @@ ABLATION_EXPERIMENTS = {
         pure_wave_kernel="sigmoid"
     ),
     "pure_wave_exp": ExperimentConfig(
-        name="Pure Wave (Exp) 🌊",
+        name="PureWaveAttn (Exp)",
         model_type="wave",
         use_rgd=True, use_qfe=True,
         lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
         pure_wave_kernel="exp"
+    ),
+    
+    # ============================================================
+    # LEGACY ALIASES (for backward compatibility)
+    # ============================================================
+    "standard_transformer": ExperimentConfig(
+        name="StdEmbed + AdamW (Control)",
+        model_type="standard",
+        use_rgd=False, use_qfe=False,
+        lr=6e-4, dropout=0.1
+    ),
+    "wave_baseline": ExperimentConfig(
+        name="WaveEmbed + AdamW",
+        model_type="wave",
+        use_rgd=False, use_qfe=False,
+        lr=6e-4, dropout=0.1
+    ),
+    "rgd_only": ExperimentConfig(
+        name="WaveEmbed + WaveOptim",
+        model_type="wave",
+        use_rgd=True, use_qfe=False,
+        lr=1e-3, dropout=0.1
+    ),
+    "full_physics": ExperimentConfig(
+        name="WaveEmbed + WaveOptim + QFE (Full)",
+        model_type="wave",
+        use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.0,
+        qfe_lambda=0.1
+    ),
+    "qfe_only": ExperimentConfig(
+        name="WaveEmbed + AdamW + QFE",
+        model_type="wave",
+        use_rgd=False, use_qfe=True,
+        lr=6e-4, dropout=0.1
+    ),
+    "pure_wave": ExperimentConfig(
+        name="PureWaveAttn (ELU+1)",
+        model_type="wave",
+        use_rgd=True, use_qfe=True,
+        lr=1e-3, dropout=0.1,
+        pure_wave_attention=True,
+        pure_wave_kernel="elu_plus_one"
     ),
 }
 
