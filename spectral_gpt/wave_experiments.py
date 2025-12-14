@@ -136,6 +136,7 @@ class ExperimentConfig:
     pure_wave_attention: bool = False  # New flag for pure attention
     pure_wave_kernel: str = "elu_plus_one" # Kernel: 'elu_plus_one', 'sigmoid', 'exp'
     pure_wave_mode: str = "quadratic"      # 'quadratic' vs 'linear'
+    use_interference_attention: bool = False  # True = physics-based InterferenceAttention (Req 2.1-2.5)
     rgd_strength: float = 0.3
     qfe_lambda: float = 0.05
     qfe_threshold: float = 0.01
@@ -289,6 +290,112 @@ ABLATION_EXPERIMENTS = {
         lr=1e-3, dropout=0.1,
         pure_wave_attention=True,
         pure_wave_kernel="elu_plus_one"
+    ),
+    
+    # ============================================================
+    # INTERFERENCE ATTENTION (True Physics - Energy Normalization)
+    # ============================================================
+    
+    # Wave Embeddings + InterferenceAttention + AdamW (isolates interference attention effect)
+    "interference_attention": ExperimentConfig(
+        name="WaveEmbed + InterferenceAttn + AdamW",
+        model_type="wave",
+        use_rgd=False, use_qfe=False,
+        use_interference_attention=True,  # True physics-based attention!
+        lr=6e-4, dropout=0.1
+    ),
+    
+    # Wave Embeddings + InterferenceAttention + WaveOptim (full physics attention)
+    "interference_full": ExperimentConfig(
+        name="WaveEmbed + InterferenceAttn + WaveOptim + QFE",
+        model_type="wave",
+        use_rgd=True, use_qfe=True,
+        use_interference_attention=True,
+        lr=1e-3, dropout=0.0,
+        qfe_lambda=0.1
+    ),
+
+    # ============================================================
+    # SYSTEMATIC GRID SEARCH (2x2x2 = 8 experiments)
+    # Factors: Embeddings × Attention × Optimizer
+    # ============================================================
+    # This grid isolates the effect of each component:
+    # - Embeddings: Standard vs Wave
+    # - Attention: Hybrid (softmax) vs Interference (physics)
+    # - Optimizer: AdamW vs WaveNativeOptimizer
+    
+    # Grid 1: Std Embed + Hybrid Attn + AdamW (CONTROL)
+    "grid_std_hybrid_adamw": ExperimentConfig(
+        name="[GRID] Std + Hybrid + AdamW",
+        model_type="standard",
+        use_rgd=False, use_qfe=False,
+        use_interference_attention=False,
+        lr=6e-4, dropout=0.1
+    ),
+    
+    # Grid 2: Std Embed + Hybrid Attn + WaveOptim
+    "grid_std_hybrid_waveopt": ExperimentConfig(
+        name="[GRID] Std + Hybrid + WaveOpt",
+        model_type="standard",
+        use_rgd=True, use_qfe=False,
+        use_interference_attention=False,
+        lr=1e-3, dropout=0.1
+    ),
+    
+    # Grid 3: Wave Embed + Hybrid Attn + AdamW
+    "grid_wave_hybrid_adamw": ExperimentConfig(
+        name="[GRID] Wave + Hybrid + AdamW",
+        model_type="wave",
+        use_rgd=False, use_qfe=False,
+        use_interference_attention=False,
+        lr=6e-4, dropout=0.1
+    ),
+    
+    # Grid 4: Wave Embed + Hybrid Attn + WaveOptim
+    "grid_wave_hybrid_waveopt": ExperimentConfig(
+        name="[GRID] Wave + Hybrid + WaveOpt",
+        model_type="wave",
+        use_rgd=True, use_qfe=False,
+        use_interference_attention=False,
+        lr=1e-3, dropout=0.1
+    ),
+    
+    # Grid 5: Wave Embed + Interference Attn + AdamW (KEY TEST!)
+    "grid_wave_interference_adamw": ExperimentConfig(
+        name="[GRID] Wave + Interference + AdamW",
+        model_type="wave",
+        use_rgd=False, use_qfe=False,
+        use_interference_attention=True,
+        lr=6e-4, dropout=0.1
+    ),
+    
+    # Grid 6: Wave Embed + Interference Attn + WaveOptim
+    "grid_wave_interference_waveopt": ExperimentConfig(
+        name="[GRID] Wave + Interference + WaveOpt",
+        model_type="wave",
+        use_rgd=True, use_qfe=False,
+        use_interference_attention=True,
+        lr=1e-3, dropout=0.1
+    ),
+    
+    # Grid 7: Wave Embed + Interference Attn + AdamW + QFE
+    "grid_wave_interference_adamw_qfe": ExperimentConfig(
+        name="[GRID] Wave + Interference + AdamW + QFE",
+        model_type="wave",
+        use_rgd=False, use_qfe=True,
+        use_interference_attention=True,
+        lr=6e-4, dropout=0.1,
+        qfe_lambda=0.05
+    ),
+    
+    # Grid 8: Wave Embed + Interference Attn + WaveOptim + QFE (FULL PHYSICS)
+    "grid_wave_interference_full": ExperimentConfig(
+        name="[GRID] Wave + Interference + WaveOpt + QFE",
+        model_type="wave",
+        use_rgd=True, use_qfe=True,
+        use_interference_attention=True,
+        lr=1e-3, dropout=0.0,
+        qfe_lambda=0.1
     ),
 }
 
@@ -541,15 +648,34 @@ def train_experiment(
     # Use WaveNativeOptimizer from wave_physics_core if available, else fall back to legacy RGD
     if exp_config.use_rgd:
         if WAVE_PHYSICS_CORE_AVAILABLE and WaveNativeOptimizer is not None:
-            # Physics-first approach: WaveNativeOptimizer with SVD projection
-            optimizer = WaveNativeOptimizer(
-                model.parameters(),
-                lr=exp_config.lr,
-                damping=0.1,
-                coherence_weight=exp_config.rgd_strength,  # Map rgd_strength to coherence_weight
-                weight_decay=exp_config.weight_decay
-            )
-            console.print(f"⚡ Optimizer: WaveNativeOptimizer (coherence={exp_config.rgd_strength})")
+            # Physics-first approach: WaveNativeOptimizer with parameter-specific masses
+            # and resonance-aware damping
+            try:
+                from wave_physics_core import create_wave_param_groups
+                param_groups = create_wave_param_groups(
+                    model, 
+                    lr=exp_config.lr, 
+                    weight_decay=exp_config.weight_decay
+                )
+                optimizer = WaveNativeOptimizer(
+                    param_groups,
+                    lr=exp_config.lr,
+                    damping=0.1,
+                    coherence_weight=exp_config.rgd_strength,
+                    weight_decay=exp_config.weight_decay,
+                    use_resonance_damping=True  # Enable adaptive damping
+                )
+                console.print(f"⚡ Optimizer: WaveNativeOptimizer (coherence={exp_config.rgd_strength}, resonance_damping=True)")
+            except ImportError:
+                # Fallback if create_wave_param_groups not available
+                optimizer = WaveNativeOptimizer(
+                    model.parameters(),
+                    lr=exp_config.lr,
+                    damping=0.1,
+                    coherence_weight=exp_config.rgd_strength,
+                    weight_decay=exp_config.weight_decay
+                )
+                console.print(f"⚡ Optimizer: WaveNativeOptimizer (coherence={exp_config.rgd_strength})")
         else:
             # Fallback to legacy ResonantGradientDescent
             optimizer = ResonantGradientDescent(
@@ -995,6 +1121,7 @@ def run_ablation_suite(
                 pure_wave_attention=getattr(exp_config, 'pure_wave_attention', False),
                 pure_wave_kernel=getattr(exp_config, 'pure_wave_kernel', 'elu_plus_one'),
                 pure_wave_mode=getattr(exp_config, 'pure_wave_mode', 'quadratic'),
+                use_interference_attention=getattr(exp_config, 'use_interference_attention', False),
                 model_type="wave"
             )
         else:

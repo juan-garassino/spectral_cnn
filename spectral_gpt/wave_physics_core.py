@@ -25,27 +25,45 @@ from typing import Optional, Callable, Iterable, Dict, List, Tuple, Any
 
 class WaveNativeOptimizer(torch.optim.Optimizer):
     """
-    Wave-Native Optimizer: Treats parameters as coupled oscillators.
+    Wave-Native Optimizer: Treats parameters as coupled oscillators with
+    parameter-specific inertia and resonance-aware damping.
     
-    Key Principles:
-    1. SVD Projection: Project gradients onto coherent subspaces defined by weight SVD
-    2. Damped Harmonic Momentum: Update velocity using damped oscillator dynamics
-    3. Coherent Gradient Combination: Blend coherent and raw gradients
+    Key Principles (from Unified Prompt):
+    1. Parameter Model: Each θ_i is a second-order system with position, velocity, mass, damping
+    2. Mass Assignment: Frequency params → low mass, phase/amp → medium, dense → high
+    3. Symplectic Heavy-Ball: v_{t+1} = (1-γ)v_t - (η/m)∇L; θ_{t+1} = θ_t + v_{t+1}
+    4. Resonance-Aware Damping: Modulate γ based on gradient-velocity alignment
     
-    Formulas:
-    - SVD: U, S, Vh = SVD(W)
-    - Coherent gradient: grad_coherent = U @ (U.T @ grad @ Vh.T) @ Vh
-    - Combined gradient: grad_final = coherence_weight * grad_coherent + (1 - coherence_weight) * raw_grad
-    - Damped momentum: v_{t+1} = v_t * (1 - damping) - grad_final * lr
-    - Parameter update: θ_{t+1} = θ_t + v_{t+1}
+    The continuous-time objective:
+        m_i * θ̈_i + γ_i * θ̇_i + ∇_{θ_i} L = 0
+    
+    Resonance detection:
+        ρ = <v_t, -∇L> / (||v_t|| * ||∇L|| + ε)
+        - ρ > 0: resonant learning → reduce damping
+        - ρ < 0: destructive updates → increase damping
     
     Args:
-        params: Model parameters
+        params: Model parameters (can be param groups with 'mass' key)
         lr: Learning rate (η)
-        damping: Damping coefficient (γ), controls momentum decay
-        coherence_weight: Weight for coherent gradient (0.7 recommended per spec)
+        damping: Base damping coefficient (γ)
+        coherence_weight: Weight for SVD-projected gradient (legacy, still supported)
         weight_decay: L2 regularization
+        use_resonance_damping: Enable adaptive damping based on gradient-velocity alignment
+        damping_adapt_rate: How fast damping adapts (0.1 = 10% change per step)
+        min_damping: Minimum damping (prevents instability)
+        max_damping: Maximum damping (prevents stalling)
     """
+    
+    # Mass presets for different parameter types
+    MASS_PRESETS = {
+        'frequency': 0.1,    # Low mass → fast adaptation for frequency params
+        'phase': 0.5,        # Medium mass → moderate stability for phase params
+        'amplitude': 0.5,    # Medium mass → moderate stability for amplitude params
+        'attention': 1.0,    # Standard mass for attention weights
+        'dense': 2.0,        # High mass → slow, stable updates for dense layers
+        'embedding': 1.5,    # Medium-high mass for embeddings
+        'default': 1.0       # Default mass
+    }
     
     def __init__(
         self,
@@ -53,7 +71,11 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
         lr: float = 1e-3,
         damping: float = 0.1,
         coherence_weight: float = 0.7,
-        weight_decay: float = 0.01
+        weight_decay: float = 0.01,
+        use_resonance_damping: bool = True,
+        damping_adapt_rate: float = 0.1,
+        min_damping: float = 0.01,
+        max_damping: float = 0.5
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -66,7 +88,12 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
             lr=lr,
             damping=damping,
             coherence_weight=coherence_weight,
-            weight_decay=weight_decay
+            weight_decay=weight_decay,
+            use_resonance_damping=use_resonance_damping,
+            damping_adapt_rate=damping_adapt_rate,
+            min_damping=min_damping,
+            max_damping=max_damping,
+            mass=1.0  # Default mass
         )
         super().__init__(params, defaults)
     
@@ -111,10 +138,86 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
             # SVD failed to converge - return None to signal fallback
             return None
     
+    def _compute_resonance(
+        self,
+        velocity: torch.Tensor,
+        grad: torch.Tensor,
+        eps: float = 1e-8
+    ) -> float:
+        """
+        Compute resonance factor ρ = <v, -∇L> / (||v|| * ||∇L|| + ε)
+        
+        - ρ > 0: velocity and negative gradient aligned → resonant learning
+        - ρ < 0: velocity and negative gradient opposed → destructive updates
+        
+        Args:
+            velocity: Current velocity tensor
+            grad: Current gradient tensor
+            eps: Small constant for numerical stability
+            
+        Returns:
+            Resonance factor in [-1, 1]
+        """
+        v_flat = velocity.flatten()
+        g_flat = grad.flatten()
+        
+        # <v, -∇L> = -<v, ∇L>
+        dot_product = -torch.dot(v_flat, g_flat)
+        
+        v_norm = torch.norm(v_flat)
+        g_norm = torch.norm(g_flat)
+        
+        rho = dot_product / (v_norm * g_norm + eps)
+        
+        return rho.item()
+    
+    def _adapt_damping(
+        self,
+        current_damping: float,
+        resonance: float,
+        adapt_rate: float,
+        min_damping: float,
+        max_damping: float
+    ) -> float:
+        """
+        Adapt damping based on resonance factor.
+        
+        - Resonant (ρ > 0): Reduce damping to allow momentum to build
+        - Destructive (ρ < 0): Increase damping to prevent oscillation
+        
+        Args:
+            current_damping: Current damping value
+            resonance: Resonance factor ρ
+            adapt_rate: How fast to adapt (0.1 = 10% change)
+            min_damping: Minimum allowed damping
+            max_damping: Maximum allowed damping
+            
+        Returns:
+            New damping value
+        """
+        if resonance > 0:
+            # Resonant learning → reduce damping
+            new_damping = current_damping * (1 - adapt_rate * resonance)
+        else:
+            # Destructive updates → increase damping
+            new_damping = current_damping * (1 + adapt_rate * abs(resonance))
+        
+        # Clamp to valid range
+        return max(min_damping, min(max_damping, new_damping))
+    
     @torch.no_grad()
     def step(self, closure: Optional[Callable] = None) -> Optional[float]:
         """
-        Perform optimization step with SVD projection and damped harmonic momentum.
+        Perform optimization step with symplectic heavy-ball dynamics
+        and resonance-aware damping.
+        
+        Update equations:
+            v_{t+1} = (1 - γ) * v_t - (η / m) * ∇L
+            θ_{t+1} = θ_t + v_{t+1}
+        
+        Where:
+            - γ is adaptively modulated based on gradient-velocity alignment
+            - m is parameter-specific mass (low for frequency params, high for dense)
         
         Args:
             closure: Optional closure for computing loss
@@ -129,9 +232,14 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
         
         for group in self.param_groups:
             lr = group['lr']
-            damping = group['damping']
+            base_damping = group['damping']
             coherence_weight = group['coherence_weight']
             weight_decay = group['weight_decay']
+            mass = group.get('mass', 1.0)
+            use_resonance_damping = group.get('use_resonance_damping', True)
+            damping_adapt_rate = group.get('damping_adapt_rate', 0.1)
+            min_damping = group.get('min_damping', 0.01)
+            max_damping = group.get('max_damping', 0.5)
             
             for p in group['params']:
                 if p.grad is None:
@@ -144,8 +252,10 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
                 if len(state) == 0:
                     # Initialize velocity (momentum) to zeros
                     state['velocity'] = torch.zeros_like(p)
+                    state['damping'] = base_damping  # Per-parameter adaptive damping
                 
                 velocity = state['velocity']
+                current_damping = state['damping']
                 
                 # Apply weight decay (L2 regularization)
                 if weight_decay != 0:
@@ -157,7 +267,6 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
                     
                     if grad_coherent is not None:
                         # Combine coherent and raw gradients
-                        # grad_final = coherence_weight * grad_coherent + (1 - coherence_weight) * raw_grad
                         grad_final = coherence_weight * grad_coherent + (1 - coherence_weight) * grad
                     else:
                         # SVD failed - fall back to raw gradient
@@ -166,9 +275,19 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
                     # Non-2D tensors or coherence disabled - use raw gradient
                     grad_final = grad
                 
-                # Damped harmonic momentum update
-                # v_{t+1} = v_t * (1 - γ) - ∇L * η
-                velocity.mul_(1 - damping).sub_(grad_final, alpha=lr)
+                # Compute resonance and adapt damping
+                if use_resonance_damping and velocity.abs().sum() > 1e-8:
+                    resonance = self._compute_resonance(velocity, grad_final)
+                    current_damping = self._adapt_damping(
+                        current_damping, resonance,
+                        damping_adapt_rate, min_damping, max_damping
+                    )
+                    state['damping'] = current_damping
+                
+                # Symplectic Heavy-Ball update with mass
+                # v_{t+1} = (1 - γ) * v_t - (η / m) * ∇L
+                effective_lr = lr / mass
+                velocity.mul_(1 - current_damping).sub_(grad_final, alpha=effective_lr)
                 
                 # Parameter update
                 # θ_{t+1} = θ_t + v_{t+1}
@@ -176,6 +295,126 @@ class WaveNativeOptimizer(torch.optim.Optimizer):
         
         return loss
 
+
+def create_wave_param_groups(
+    model: nn.Module,
+    lr: float = 1e-3,
+    weight_decay: float = 0.01
+) -> List[Dict]:
+    """
+    Create parameter groups with physics-based mass assignments.
+    
+    Mass assignment by parameter type:
+    - Frequency parameters (base_freqs, freq_proj): low mass (0.1) → fast adaptation
+    - Phase parameters (phases, phase_proj): medium mass (0.5) → moderate stability
+    - Amplitude parameters (harmonic_amps, amp_proj): medium mass (0.5)
+    - Attention weights: standard mass (1.0)
+    - Dense/MLP weights: high mass (2.0) → slow, stable updates
+    - Embeddings: medium-high mass (1.5)
+    
+    Args:
+        model: The model to create parameter groups for
+        lr: Base learning rate
+        weight_decay: Weight decay for regularization
+        
+    Returns:
+        List of parameter group dicts suitable for WaveNativeOptimizer
+    """
+    # Categorize parameters by name patterns
+    frequency_params = []
+    phase_params = []
+    amplitude_params = []
+    attention_params = []
+    dense_params = []
+    embedding_params = []
+    other_params = []
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+            
+        name_lower = name.lower()
+        
+        # Frequency-related parameters
+        if any(k in name_lower for k in ['freq', 'omega', 'frequency']):
+            frequency_params.append(param)
+        # Phase-related parameters
+        elif any(k in name_lower for k in ['phase', 'phi']):
+            phase_params.append(param)
+        # Amplitude-related parameters
+        elif any(k in name_lower for k in ['amp', 'harmonic_amp', 'amplitude']):
+            amplitude_params.append(param)
+        # Attention weights
+        elif any(k in name_lower for k in ['attn', 'attention', 'q_proj', 'k_proj', 'v_proj', 'o_proj']):
+            attention_params.append(param)
+        # Dense/MLP weights
+        elif any(k in name_lower for k in ['mlp', 'fc', 'dense', 'linear', 'head']):
+            dense_params.append(param)
+        # Embedding weights
+        elif 'embed' in name_lower:
+            embedding_params.append(param)
+        else:
+            other_params.append(param)
+    
+    param_groups = []
+    
+    if frequency_params:
+        param_groups.append({
+            'params': frequency_params,
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'mass': WaveNativeOptimizer.MASS_PRESETS['frequency']
+        })
+    
+    if phase_params:
+        param_groups.append({
+            'params': phase_params,
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'mass': WaveNativeOptimizer.MASS_PRESETS['phase']
+        })
+    
+    if amplitude_params:
+        param_groups.append({
+            'params': amplitude_params,
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'mass': WaveNativeOptimizer.MASS_PRESETS['amplitude']
+        })
+    
+    if attention_params:
+        param_groups.append({
+            'params': attention_params,
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'mass': WaveNativeOptimizer.MASS_PRESETS['attention']
+        })
+    
+    if dense_params:
+        param_groups.append({
+            'params': dense_params,
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'mass': WaveNativeOptimizer.MASS_PRESETS['dense']
+        })
+    
+    if embedding_params:
+        param_groups.append({
+            'params': embedding_params,
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'mass': WaveNativeOptimizer.MASS_PRESETS['embedding']
+        })
+    
+    if other_params:
+        param_groups.append({
+            'params': other_params,
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'mass': WaveNativeOptimizer.MASS_PRESETS['default']
+        })
+    
+    return param_groups
 
 
 # ==========================================
