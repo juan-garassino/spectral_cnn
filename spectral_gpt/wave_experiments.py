@@ -738,7 +738,7 @@ def train_experiment(
                 perplexities.append(math.exp(current_val_loss))
                 
                 # Log CE loss explicitly
-                console.print(f"Step {step+1:5d} | Train(CE): {ce_loss_scalar.item():.4f} | Val: {current_val_loss:.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
+                console.print(f"Step {step+1:5d} | Train(CE): {avg_loss:.4f} | Val: {current_val_loss:.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
                 
                 # Generate visualizations if monitoring enabled
                 if viz_manager and viz_manager.should_visualize(step + 1):
