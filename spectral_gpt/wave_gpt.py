@@ -126,12 +126,16 @@ class WavePacketEmbedding(nn.Module):
     Tokens are quantized resonant modes following natural physical laws:
     - Token mass follows Zipfian distribution: Mass(i) = 1/(i+1)
     - Base frequency: ω_0 = 1.0 / sqrt(Mass) (heavy tokens = low freq, light tokens = high freq)
-    - Harmonic frequencies: ω_n = n * ω_0 (strict integer multiples, no noise)
-    - Harmonic amplitudes: A_n = 1/n (power law decay)
+    - Harmonic frequencies: ω_n = n * ω_0 (initialized as integer multiples, but LEARNABLE)
+    - Harmonic amplitudes: A_n = 1/n (initialized with power law decay, but LEARNABLE)
     
     Training Strategy:
     - Supports annealing via standard_embed_ratio parameter
     - out = (1-r)*wave + r*standard where r decays from 1.0 to 0.0
+    
+    Key change from original: frequencies and amplitudes are now LEARNABLE parameters
+    initialized with physics-based values, allowing the model to adapt while starting
+    from a physically meaningful prior.
     
     Requirements: 1.1, 1.2, 1.3, 1.4, 1.5
     """
@@ -143,30 +147,30 @@ class WavePacketEmbedding(nn.Module):
         self.num_harmonics = num_harmonics
         
         # === Requirement 1.1: Zipfian mass distribution ===
-        # Mass(i) = 1/(i+1) - stored as buffer (not learnable)
+        # Mass(i) = 1/(i+1) - stored as buffer (reference only)
         token_indices = torch.arange(vocab_size, dtype=torch.float32)
         masses = 1.0 / (token_indices + 1.0)  # Zipfian: Mass(i) = 1/(i+1)
         self.register_buffer('masses', masses)  # (vocab_size,)
         
         # === Requirement 1.2: Mass-frequency relationship ===
-        # ω_0 = 1.0 / sqrt(Mass) - heavy tokens have low freq, light tokens have high freq
-        base_frequencies = 1.0 / torch.sqrt(masses)  # (vocab_size,)
-        # Expand to num_waves - each wave can have a slightly different base
-        # We use the same base frequency for all waves per token (physics-based)
-        base_frequencies = base_frequencies.unsqueeze(1).expand(-1, num_waves)  # (vocab_size, num_waves)
-        self.register_buffer('base_freqs', base_frequencies)
+        # LEARNABLE frequencies initialized with physics prior: ω_0 = 1.0 / sqrt(Mass)
+        # Heavy tokens start with low freq, light tokens start with high freq
+        # But the model can learn to adjust these!
+        init_base_frequencies = 1.0 / torch.sqrt(masses)  # (vocab_size,)
+        init_base_frequencies = init_base_frequencies.unsqueeze(1).expand(-1, num_waves).clone()
+        self.base_freqs = nn.Parameter(init_base_frequencies)  # NOW LEARNABLE!
         
         # === Requirement 1.3: Harmonic quantization ===
-        # ω_n = n * ω_0 - strict integer multiples, no random noise
+        # Harmonic multipliers - keep as buffer (structural, not learned)
         harmonic_mults = torch.arange(1, num_harmonics + 1, dtype=torch.float32)  # [1, 2, 3, 4, ...]
         self.register_buffer('harmonic_mults', harmonic_mults)
         
         # === Requirement 1.4: Power law amplitude decay ===
-        # A_n = 1/n for each harmonic
-        harmonic_amplitudes = 1.0 / harmonic_mults  # [1, 0.5, 0.333, 0.25, ...]
-        # Expand to (vocab_size, num_waves, num_harmonics)
-        harmonic_amplitudes = harmonic_amplitudes.view(1, 1, num_harmonics).expand(vocab_size, num_waves, -1)
-        self.register_buffer('harmonic_amps', harmonic_amplitudes.clone())
+        # LEARNABLE amplitudes initialized with physics prior: A_n = 1/n
+        # But the model can learn what harmonics matter!
+        init_harmonic_amplitudes = 1.0 / harmonic_mults  # [1, 0.5, 0.333, 0.25, ...]
+        init_harmonic_amplitudes = init_harmonic_amplitudes.view(1, 1, num_harmonics).expand(vocab_size, num_waves, -1).clone()
+        self.harmonic_amps = nn.Parameter(init_harmonic_amplitudes)  # NOW LEARNABLE!
         
         # Phases: where in the wave cycle does this token start?
         # Learnable phases for expressivity

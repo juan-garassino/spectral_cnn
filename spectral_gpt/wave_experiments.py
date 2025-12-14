@@ -719,7 +719,8 @@ def train_experiment(
             # Check every 250 steps for scientific rigor
             if (step + 1) % 250 == 0:
                 avg = sum(losses[-250:]) / len(losses[-250:])
-                wave_r = wave_ratios[-1] if wave_ratios else 0.5
+                # Use actual annealing ratio instead of legacy wave_ratio
+                wave_r = current_annealing_ratio
                 
                 # Fast validation check
                 model.eval()
