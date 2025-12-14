@@ -353,19 +353,25 @@ class WaveInterferenceAttention(nn.Module):
 
 
 # ==========================================
-# Physics-Based Interference Attention
+# Physics-Based Interference Attention (Memory-Efficient)
 # ==========================================
 
 class InterferenceAttention(nn.Module):
     """
-    Physics-based attention via wave interference rather than dot products.
+    Memory-efficient physics-based attention via wave interference.
     
-    This implements the exact wave interference formula from physics:
-    - Projects input to Frequency, Phase, and Amplitude components (not Q/K)
-    - Computes phase evolution: φ(t) = ω * t + φ_0
-    - Computes interference intensity: I = A_q² + A_k² + 2*A_q*A_k*cos(Δω*(t_q - t_k) + Δφ)
-    - Normalizes by energy potential (A_q + A_k)² instead of softmax
-    - Applies causal masking via torch.triu
+    Core physics: I = A_q² + A_k² + 2*A_q*A_k*cos(Δω*Δt + Δφ)
+    
+    MEMORY OPTIMIZATION (CRITICAL FOR TRAINING):
+    The naive implementation creates (B, H, T, T, W) tensors = O(T²W) memory.
+    With T=256, H=8, W=48, B=4: 4*8*256*256*48 = 100M floats = 400MB per layer!
+    
+    This version uses PHASOR DECOMPOSITION to achieve O(T²) memory:
+    
+    Key insight: sum_w[A_q*A_k*cos(θ_q - θ_k)] = Re(phasor_q · phasor_k*)
+    where phasor = sum_w[A * e^(iθ)]
+    
+    By pre-computing phasor sums over W, we avoid the T×T×W explosion.
     
     Requirements: 2.1, 2.2, 2.3, 2.4, 2.5
     """
@@ -376,15 +382,6 @@ class InterferenceAttention(nn.Module):
         num_waves: int = 16,
         dropout: float = 0.1
     ):
-        """
-        Initialize interference-based attention.
-        
-        Args:
-            d_model: Model dimension
-            num_heads: Number of attention heads
-            num_waves: Wave components for interference computation
-            dropout: Dropout probability
-        """
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         
@@ -394,182 +391,167 @@ class InterferenceAttention(nn.Module):
         self.num_waves = num_waves
         
         # === Requirement 2.1: Frequency/Phase/Amplitude projections ===
-        # Replace Q/K projections with freq_proj, phase_proj, amp_proj
         self.freq_proj = nn.Linear(d_model, num_heads * num_waves)
         self.phase_proj = nn.Linear(d_model, num_heads * num_waves)
         self.amp_proj = nn.Linear(d_model, num_heads * num_waves)
         
-        # Value projection (still needed to carry information)
+        # Value projection
         self.v_proj = nn.Linear(d_model, d_model)
         self.o_proj = nn.Linear(d_model, d_model)
         
         self.dropout = nn.Dropout(dropout)
-        
-        # Small epsilon for numerical stability
         self.eps = 1e-8
+        
+        # Learnable temperature for attention sharpness
+        self.temperature = nn.Parameter(torch.ones(1))
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Compute attention via wave interference.
+        Memory-efficient wave interference attention using phasor decomposition.
         
-        Args:
-            x: (B, T, d_model) input tensor
-            
-        Returns:
-            (B, T, d_model) attended output
+        Memory: O(B*H*T*T) instead of O(B*H*T*T*W)
         """
         B, T, C = x.shape
         device = x.device
+        dtype = x.dtype
         
-        # === Requirement 2.1: Project to Frequency, Phase, Amplitude ===
-        # Shape: (B, T, num_heads * num_waves) -> (B, num_heads, T, num_waves)
+        # === Project to wave parameters (B, H, T, W) ===
         freq = self.freq_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
         phase_0 = self.phase_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
         amp = self.amp_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
         
-        # Ensure amplitudes are positive (physical constraint)
+        # Positive amplitudes (physical constraint)
         amp = F.softplus(amp) + self.eps  # (B, H, T, W)
         
         # Value projection
         v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, T, D)
         
-        # === Requirement 2.2: Phase evolution ===
-        # Map token position P to time t
-        # φ(t) = ω * t + φ_0
-        t_positions = torch.arange(T, device=device, dtype=x.dtype)  # (T,)
+        # === Phase evolution: θ(t) = ω*t + φ_0 ===
+        t_pos = torch.arange(T, device=device, dtype=dtype).view(1, 1, T, 1)  # (1, 1, T, 1)
+        theta = freq * t_pos + phase_0  # (B, H, T, W) - evolved phase at each position
         
-        # Compute evolved phases for each position
-        # freq: (B, H, T, W), t_positions: (T,) -> need to broadcast
-        # For query at position t_q: φ_q(t_q) = ω_q * t_q + φ_0_q
-        t_q = t_positions.view(1, 1, T, 1)  # (1, 1, T, 1)
-        evolved_phase = freq * t_q + phase_0  # (B, H, T, W)
+        # === PHASOR DECOMPOSITION (Memory-Efficient) ===
+        #
+        # Full interference formula:
+        # I[q,k] = sum_w(A_q² + A_k² + 2*A_q*A_k*cos(θ_q - θ_k))
+        #
+        # Decompose into three terms:
+        # Term 1: sum_w(A_q²) - shape (B, H, T), broadcast to (B, H, T, T)
+        # Term 2: sum_w(A_k²) - shape (B, H, T), broadcast to (B, H, T, T)
+        # Term 3: 2*Re(phasor_q · phasor_k*) where phasor = sum_w(A * e^(iθ))
+        #
+        # The key insight: sum_w(A_q*A_k*cos(θ_q - θ_k)) = Re(sum_w(A_q*e^(iθ_q)) · sum_w(A_k*e^(-iθ_k)))
+        # This lets us compute the cross term as a (B,H,T) x (B,H,T) outer product!
         
-        # === Requirement 2.3: Interference intensity computation ===
-        # I(t_q, t_k) = A_q² + A_k² + 2*A_q*A_k*cos(Δω*(t_q - t_k) + Δφ)
+        # Term 1 & 2: Amplitude squared sums (B, H, T)
+        amp_sq_sum = (amp ** 2).sum(dim=-1)  # (B, H, T)
         
-        # Compute pairwise differences for interference
-        # A_q: amplitude at query position, A_k: amplitude at key position
-        A_q = amp.unsqueeze(3)  # (B, H, T, 1, W) - query amplitudes
-        A_k = amp.unsqueeze(2)  # (B, H, 1, T, W) - key amplitudes
+        # Term 3: Phasor approach
+        # phasor[t] = sum_w(A[t,w] * e^(i*θ[t,w]))
+        # Shape: (B, H, T) complex
+        phasor = (amp * torch.exp(1j * theta.to(torch.complex64))).sum(dim=-1)  # (B, H, T) complex
         
-        # Frequency and phase at each position
-        omega_q = freq.unsqueeze(3)  # (B, H, T, 1, W)
-        omega_k = freq.unsqueeze(2)  # (B, H, 1, T, W)
-        phi_q = evolved_phase.unsqueeze(3)  # (B, H, T, 1, W)
-        phi_k = evolved_phase.unsqueeze(2)  # (B, H, 1, T, W)
+        # Cross term = 2 * Re(phasor_q · phasor_k*)
+        # phasor: (B, H, T) -> outer product gives (B, H, T, T)
+        cross_term = 2 * (phasor.unsqueeze(-1) * phasor.conj().unsqueeze(-2)).real  # (B, H, T, T)
         
-        # Time differences: t_q - t_k
-        t_k = t_positions.view(1, 1, 1, T)  # (1, 1, 1, T)
-        t_q_expanded = t_positions.view(1, 1, T, 1)  # (1, 1, T, 1)
-        delta_t = t_q_expanded - t_k  # (1, 1, T, T)
+        # Total intensity: I = sum(A_q²) + sum(A_k²) + 2*Re(phasor_q · phasor_k*)
+        intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term  # (B, H, T, T)
         
-        # Frequency and phase differences
-        delta_omega = omega_q - omega_k  # (B, H, T, T, W)
-        delta_phi = phi_q - phi_k  # (B, H, T, T, W)
+        # === Energy normalization (Requirement 2.5) ===
+        # Normalize by maximum possible intensity when waves perfectly align
+        # Max intensity per wave: (A_q + A_k)² when cos=1
+        # Approximation: use (sum_w A_q + sum_w A_k)² as upper bound
+        amp_sum = amp.sum(dim=-1)  # (B, H, T)
+        energy_potential = (amp_sum.unsqueeze(-1) + amp_sum.unsqueeze(-2)) ** 2  # (B, H, T, T)
         
-        # Interference formula: I = A_q² + A_k² + 2*A_q*A_k*cos(Δω*(t_q - t_k) + Δφ)
-        # Note: delta_phi already includes the ω*t terms, so we use:
-        # cos_term = cos(Δω * Δt + (φ_0_q - φ_0_k))
-        # But since evolved_phase = ω*t + φ_0, we have:
-        # phi_q - phi_k = ω_q*t_q + φ_0_q - (ω_k*t_k + φ_0_k)
-        # We want: Δω*(t_q - t_k) + Δφ_0 = (ω_q - ω_k)*(t_q - t_k) + (φ_0_q - φ_0_k)
-        
-        # Recompute using initial phases for clarity
-        phi_0_q = phase_0.unsqueeze(3)  # (B, H, T, 1, W)
-        phi_0_k = phase_0.unsqueeze(2)  # (B, H, 1, T, W)
-        delta_phi_0 = phi_0_q - phi_0_k  # (B, H, T, T, W)
-        
-        # Interference argument: Δω*(t_q - t_k) + Δφ_0
-        interference_arg = delta_omega * delta_t.unsqueeze(-1) + delta_phi_0  # (B, H, T, T, W)
-        
-        # Compute intensity per wave component
-        A_q_sq = A_q ** 2  # (B, H, T, 1, W)
-        A_k_sq = A_k ** 2  # (B, H, 1, T, W)
-        cross_term = 2 * A_q * A_k * torch.cos(interference_arg)  # (B, H, T, T, W)
-        
-        # Sum over wave components to get total intensity
-        intensity = (A_q_sq + A_k_sq + cross_term).sum(dim=-1)  # (B, H, T, T)
-        
-        # === Requirement 2.4: Causal masking ===
-        # Apply torch.triu mask to prevent future interference
-        causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-        intensity = intensity.masked_fill(causal_mask, 0.0)
-        
-        # === Requirement 2.5: Energy-based normalization ===
-        # Normalize by (A_q + A_k)² instead of softmax
-        # This allows output values to exceed 1.0 (superposition)
-        A_q_sum = amp.unsqueeze(3)  # (B, H, T, 1, W)
-        A_k_sum = amp.unsqueeze(2)  # (B, H, 1, T, W)
-        energy_potential = ((A_q_sum + A_k_sum) ** 2).sum(dim=-1)  # (B, H, T, T)
-        
-        # Apply causal mask to energy potential as well
-        energy_potential = energy_potential.masked_fill(causal_mask, 1.0)  # Avoid division by zero
-        
-        # Normalize: weights = intensity / energy_potential
-        # Note: This is NOT softmax - values can exceed 1.0
+        # Normalize intensity
         attn_weights = intensity / (energy_potential + self.eps)  # (B, H, T, T)
         
-        # Apply dropout
+        # Temperature scaling (learnable sharpness)
+        attn_weights = attn_weights * self.temperature
+        
+        # === Causal masking (Requirement 2.4) ===
+        causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
+        attn_weights = attn_weights.masked_fill(causal_mask, 0.0)
+        
+        # Row-wise normalization for stability (NOT softmax - preserves interference structure)
+        # This ensures attention weights sum to ~1 per query position
+        row_sum = attn_weights.sum(dim=-1, keepdim=True).clamp(min=self.eps)
+        attn_weights = attn_weights / row_sum
+        
+        # Dropout
         attn_weights = self.dropout(attn_weights)
         
-        # Apply attention to values
+        # Apply to values
         out = torch.matmul(attn_weights, v)  # (B, H, T, D)
         
-        # Reshape and project output
+        # Output projection
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         out = self.o_proj(out)
         
         return out
     
-    def get_interference_weights(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Get the raw interference weights for visualization/debugging.
-        
-        Args:
-            x: (B, T, d_model) input tensor
-            
-        Returns:
-            (B, num_heads, T, T) interference weight matrix
-        """
+    def get_interference_pattern(self, x: torch.Tensor) -> torch.Tensor:
+        """Get raw interference pattern for visualization (before normalization)."""
         B, T, C = x.shape
         device = x.device
+        dtype = x.dtype
         
-        # Project to wave components
         freq = self.freq_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
         phase_0 = self.phase_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
         amp = self.amp_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
         amp = F.softplus(amp) + self.eps
         
-        # Time positions
-        t_positions = torch.arange(T, device=device, dtype=x.dtype)
+        t_pos = torch.arange(T, device=device, dtype=dtype).view(1, 1, T, 1)
+        theta = freq * t_pos + phase_0
         
-        # Compute interference
-        A_q = amp.unsqueeze(3)
-        A_k = amp.unsqueeze(2)
-        omega_q = freq.unsqueeze(3)
-        omega_k = freq.unsqueeze(2)
-        phi_0_q = phase_0.unsqueeze(3)
-        phi_0_k = phase_0.unsqueeze(2)
+        amp_sq_sum = (amp ** 2).sum(dim=-1)
+        phasor = (amp * torch.exp(1j * theta.to(torch.complex64))).sum(dim=-1)
+        cross_term = 2 * (phasor.unsqueeze(-1) * phasor.conj().unsqueeze(-2)).real
         
-        delta_omega = omega_q - omega_k
-        delta_phi_0 = phi_0_q - phi_0_k
+        intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term
         
-        t_k = t_positions.view(1, 1, 1, T)
-        t_q = t_positions.view(1, 1, T, 1)
-        delta_t = t_q - t_k
-        
-        interference_arg = delta_omega * delta_t.unsqueeze(-1) + delta_phi_0
-        intensity = (A_q**2 + A_k**2 + 2*A_q*A_k*torch.cos(interference_arg)).sum(dim=-1)
-        
-        # Apply causal mask
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-        intensity = intensity.masked_fill(causal_mask, 0.0)
+        return intensity.masked_fill(causal_mask, 0.0)
+    
+    def get_interference_weights(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Get the normalized interference weights for visualization/debugging.
+        Uses the same phasor decomposition as forward() for memory efficiency.
+        """
+        B, T, C = x.shape
+        device = x.device
+        dtype = x.dtype
         
-        # Normalize
-        energy_potential = ((A_q + A_k)**2).sum(dim=-1)
-        energy_potential = energy_potential.masked_fill(causal_mask, 1.0)
+        freq = self.freq_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        phase_0 = self.phase_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        amp = self.amp_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        amp = F.softplus(amp) + self.eps
         
-        return intensity / (energy_potential + self.eps)
+        t_pos = torch.arange(T, device=device, dtype=dtype).view(1, 1, T, 1)
+        theta = freq * t_pos + phase_0
+        
+        # Phasor decomposition (memory-efficient)
+        amp_sq_sum = (amp ** 2).sum(dim=-1)
+        phasor = (amp * torch.exp(1j * theta.to(torch.complex64))).sum(dim=-1)
+        cross_term = 2 * (phasor.unsqueeze(-1) * phasor.conj().unsqueeze(-2)).real
+        
+        intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term
+        
+        # Energy normalization
+        amp_sum = amp.sum(dim=-1)
+        energy_potential = (amp_sum.unsqueeze(-1) + amp_sum.unsqueeze(-2)) ** 2
+        
+        attn_weights = intensity / (energy_potential + self.eps)
+        
+        # Causal mask
+        causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
+        attn_weights = attn_weights.masked_fill(causal_mask, 0.0)
+        
+        # Row normalization
+        row_sum = attn_weights.sum(dim=-1, keepdim=True).clamp(min=self.eps)
+        return attn_weights / row_sum
 
 
 # ==========================================

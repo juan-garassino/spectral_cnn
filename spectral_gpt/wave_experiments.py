@@ -296,6 +296,7 @@ ABLATION_EXPERIMENTS = {
     # ============================================================
     # INTERFERENCE ATTENTION (True Physics - Energy Normalization)
     # ============================================================
+    # Memory-optimized via phasor decomposition: O(T²) instead of O(T²W)
     
     # Wave Embeddings + InterferenceAttention + AdamW (isolates interference attention effect)
     "interference_attention": ExperimentConfig(
@@ -303,9 +304,8 @@ ABLATION_EXPERIMENTS = {
         model_type="wave",
         use_rgd=False, use_qfe=False,
         use_interference_attention=True,  # True physics-based attention!
-        lr=6e-4, dropout=0.1,
-        batch_size_override=4,  # Smaller batch - InterferenceAttention uses more memory
-        grad_accum_steps=8  # Compensate: effective batch = 4 * 8 = 32
+        lr=6e-4, dropout=0.1
+        # No batch_size_override needed - phasor decomposition is memory-efficient
     ),
     
     # Wave Embeddings + InterferenceAttention + WaveOptim (full physics attention)
@@ -315,9 +315,8 @@ ABLATION_EXPERIMENTS = {
         use_rgd=True, use_qfe=True,
         use_interference_attention=True,
         lr=1e-3, dropout=0.0,
-        qfe_lambda=0.1,
-        batch_size_override=4,  # Smaller batch - InterferenceAttention uses more memory
-        grad_accum_steps=8  # Compensate: effective batch = 4 * 8 = 32
+        qfe_lambda=0.1
+        # No batch_size_override needed - phasor decomposition is memory-efficient
     ),
 
     # ============================================================
@@ -371,8 +370,8 @@ ABLATION_EXPERIMENTS = {
         model_type="wave",
         use_rgd=False, use_qfe=False,
         use_interference_attention=True,
-        lr=6e-4, dropout=0.1,
-        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
+        lr=6e-4, dropout=0.1
+        # Memory-efficient via phasor decomposition
     ),
     
     # Grid 6: Wave Embed + Interference Attn + WaveOptim
@@ -381,8 +380,8 @@ ABLATION_EXPERIMENTS = {
         model_type="wave",
         use_rgd=True, use_qfe=False,
         use_interference_attention=True,
-        lr=1e-3, dropout=0.1,
-        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
+        lr=1e-3, dropout=0.1
+        # Memory-efficient via phasor decomposition
     ),
     
     # Grid 7: Wave Embed + Interference Attn + AdamW + QFE
@@ -392,8 +391,8 @@ ABLATION_EXPERIMENTS = {
         use_rgd=False, use_qfe=True,
         use_interference_attention=True,
         lr=6e-4, dropout=0.1,
-        qfe_lambda=0.05,
-        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
+        qfe_lambda=0.05
+        # Memory-efficient via phasor decomposition
     ),
     
     # Grid 8: Wave Embed + Interference Attn + WaveOptim + QFE (FULL PHYSICS)
@@ -403,8 +402,8 @@ ABLATION_EXPERIMENTS = {
         use_rgd=True, use_qfe=True,
         use_interference_attention=True,
         lr=1e-3, dropout=0.0,
-        qfe_lambda=0.1,
-        batch_size_override=4, grad_accum_steps=8  # Memory: InterferenceAttention
+        qfe_lambda=0.1
+        # Memory-efficient via phasor decomposition
     ),
 }
 

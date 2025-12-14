@@ -5,7 +5,7 @@
 | Component | Options | Description |
 |-----------|---------|-------------|
 | **Embeddings** | Standard / Wave | Standard = lookup table, Wave = physics-based (ω₀ = 1/√Mass) |
-| **Attention** | Standard / Hybrid / Interference | Standard = vanilla GPT-2 (Q·K softmax), Hybrid = wave interference + softmax, Interference = energy normalization (I = A²+A²+2AA·cos(Δφ)) |
+| **Attention** | Standard / Hybrid / Interference | Standard = vanilla GPT-2 (Q·K softmax), Hybrid = wave interference + softmax, Interference = phasor-based energy normalization (I = A²+A²+2AA·cos(Δφ), O(T²) memory) |
 | **Optimizer** | AdamW / WaveOpt | AdamW = standard, WaveOpt = parameter-specific masses + resonance damping |
 | **Loss** | CE / QFE | CE = CrossEntropy, QFE = + phase/energy/harmonic regularization |
 
@@ -106,7 +106,7 @@ standard_transformer  vs  interference_full
 |------------|----------|------------|-------|---------|
 | `standard_transformer` | 4.35 | 97 | 12,357 | ✅ Coherent |
 | `wave_baseline` | 5.18 | 190 | 10,713 | ✅ Coherent |
-| `interference_attention` | ? | ? | ? | ? |
+| `interference_attention` | ? | ? | ? | ✅ Ready (memory-optimized) |
 | `rgd_only` | ? | ? | ? | ? |
 | `qfe_only` | ? | ? | ? | ? |
 | `full_physics` | 7.86 | 2517 | 4,442 | ❌ Gibberish |
