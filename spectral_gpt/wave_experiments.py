@@ -149,9 +149,15 @@ class ExperimentConfig:
     patience: int = 8   # Scientific default
     steps: int = 10000   # Scaled for 500M tokens (~7.4 tokens/param)
     wave_ratio_schedule: bool = True  # Schedule wave_ratio from 0.5 to 0.9
-    model_type: str = "wave" # "wave" or "standard"
+    model_type: str = "wave" # "wave", "standard", or "pure_wave"
     grad_accum_steps: int = 2 # Restore effective B=32 (since physical B=16)
     batch_size_override: int = None  # Override batch size (for memory-heavy experiments like InterferenceAttention)
+    
+    # === NON-LINEAR PHYSICS TRINITY (Diagonal Breaker) ===
+    use_overdrive: bool = False      # Soft-clipping saturation → square waves
+    use_fm_synthesis: bool = False   # Frequency modulation → context shifts logic frequencies  
+    use_interferometer: bool = False # Phase-based gated residuals → boolean logic via interference
+    mlp_expansion: int = 1           # Hidden dimension multiplier (4x for reasoning core shift)
 
 
 
@@ -432,6 +438,92 @@ ABLATION_EXPERIMENTS = {
         qfe_lambda=0.1
         # Memory-efficient via phasor decomposition
     ),
+    
+    # ============================================================
+    # DIAGONAL BREAKER EXPERIMENTS (Non-Linear Physics Trinity)
+    # ============================================================
+    
+    # Baseline: Pure Wave without Trinity (should show diagonal blindness)
+    "diagonal_baseline": ExperimentConfig(
+        name="PureWave Baseline (Diagonal Blind)",
+        model_type="pure_wave",
+        use_rgd=False, use_qfe=False,
+        lr=3e-4, dropout=0.1,
+        steps=5000,
+        # Trinity disabled - should stay diagonal
+        use_overdrive=False,
+        use_fm_synthesis=False, 
+        use_interferometer=False,
+        mlp_expansion=1  # No expansion
+    ),
+    
+    # Trinity: Non-Linear Physics Trinity (should break diagonal)
+    "diagonal_breaker": ExperimentConfig(
+        name="Non-Linear Physics Trinity (Diagonal Breaker)",
+        model_type="pure_wave", 
+        use_rgd=True, use_qfe=True,
+        lr=3e-4, dropout=0.1,
+        steps=5000,
+        qfe_lambda=0.05,
+        # Trinity enabled - should break diagonal blindness
+        use_overdrive=True,
+        use_fm_synthesis=True,
+        use_interferometer=True, 
+        mlp_expansion=4  # 4x expansion for reasoning core
+    ),
+    
+    # Ablation A: Only Overdrive (Saturation)
+    "diagonal_overdrive_only": ExperimentConfig(
+        name="Overdrive Only (Saturation)",
+        model_type="pure_wave",
+        use_rgd=True, use_qfe=False,
+        lr=3e-4, dropout=0.1,
+        steps=3000,
+        use_overdrive=True,
+        use_fm_synthesis=False,
+        use_interferometer=False,
+        mlp_expansion=4
+    ),
+    
+    # Ablation B: Only FM Synthesis (Context Modulation)
+    "diagonal_fm_only": ExperimentConfig(
+        name="FM Synthesis Only (Context Modulation)",
+        model_type="pure_wave",
+        use_rgd=True, use_qfe=False,
+        lr=3e-4, dropout=0.1,
+        steps=3000,
+        use_overdrive=False,
+        use_fm_synthesis=True,
+        use_interferometer=False,
+        mlp_expansion=4
+    ),
+    
+    # Ablation C: Only Interferometer (Phase Gating)
+    "diagonal_interferometer_only": ExperimentConfig(
+        name="Interferometer Only (Phase Gating)",
+        model_type="pure_wave",
+        use_rgd=True, use_qfe=False,
+        lr=3e-4, dropout=0.1,
+        steps=3000,
+        use_overdrive=False,
+        use_fm_synthesis=False,
+        use_interferometer=True,
+        mlp_expansion=4
+    ),
+    
+    # Quick Test: Fast diagonal check
+    "diagonal_quick": ExperimentConfig(
+        name="Quick Diagonal Test (Trinity)",
+        model_type="pure_wave",
+        use_rgd=True, use_qfe=True,
+        lr=3e-4, dropout=0.1,
+        steps=1000,  # Quick test
+        qfe_lambda=0.05,
+        use_overdrive=True,
+        use_fm_synthesis=True,
+        use_interferometer=True,
+        mlp_expansion=4
+    ),
 }
 
 
@@ -554,6 +646,150 @@ def get_dataset(dataset_name: str, console, max_tokens: int = 500_000_000, dry_r
         return load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=max_tokens)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
+# ==========================================
+# Diagonal Blindness Analysis
+# ==========================================
+
+def extract_attention_maps(model, input_ids: torch.Tensor) -> List[torch.Tensor]:
+    """Extract attention maps from PureWaveGPT for diagonal analysis."""
+    
+    attention_maps = []
+    
+    def attention_hook(module, input, output):
+        # For PureWaveInterference, extract coupling matrix if available
+        if hasattr(module, 'coupling') and module.coupling is not None:
+            # coupling shape: (B, C, T, T) - average over batch and channels
+            attn_map = module.coupling.mean(dim=(0, 1)).detach().cpu()  # (T, T)
+            attention_maps.append(attn_map)
+    
+    # Register hooks on attention layers
+    hooks = []
+    if hasattr(model, 'wave_layers'):
+        for layer in model.wave_layers:
+            if hasattr(layer, 'wave_attention'):
+                hook = layer.wave_attention.register_forward_hook(attention_hook)
+                hooks.append(hook)
+    
+    # Forward pass
+    with torch.no_grad():
+        model(input_ids)
+    
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+    
+    return attention_maps
+
+
+def analyze_diagonal_pattern(attention_maps: List[torch.Tensor]) -> Dict[str, float]:
+    """Analyze how diagonal the attention patterns are."""
+    
+    if not attention_maps:
+        return {}
+    
+    metrics = {}
+    
+    for layer_idx, attn_map in enumerate(attention_maps):
+        T = attn_map.shape[0]
+        
+        # Diagonal strength: sum of diagonal elements / sum of all elements
+        diagonal_sum = torch.diag(attn_map).sum().item()
+        total_sum = attn_map.sum().item()
+        diagonal_ratio = diagonal_sum / (total_sum + 1e-8)
+        
+        # Off-diagonal spread: how much attention goes to non-adjacent positions
+        off_diag_mask = ~torch.eye(T, dtype=torch.bool)
+        off_diag_sum = attn_map[off_diag_mask].sum().item()
+        off_diag_ratio = off_diag_sum / (total_sum + 1e-8)
+        
+        # Long-range attention: attention between positions > 10 apart
+        long_range_sum = 0
+        for i in range(T):
+            for j in range(T):
+                if abs(i - j) > 10:
+                    long_range_sum += attn_map[i, j].item()
+        long_range_ratio = long_range_sum / (total_sum + 1e-8)
+        
+        metrics[f'layer_{layer_idx}_diagonal_ratio'] = diagonal_ratio
+        metrics[f'layer_{layer_idx}_off_diagonal_ratio'] = off_diag_ratio
+        metrics[f'layer_{layer_idx}_long_range_ratio'] = long_range_ratio
+    
+    # Overall metrics
+    diagonal_ratios = [v for k, v in metrics.items() if 'diagonal_ratio' in k and 'off_' not in k]
+    long_range_ratios = [v for k, v in metrics.items() if 'long_range_ratio' in k]
+    
+    if diagonal_ratios:
+        metrics['avg_diagonal_ratio'] = np.mean(diagonal_ratios)
+    if long_range_ratios:
+        metrics['avg_long_range_ratio'] = np.mean(long_range_ratios)
+    
+    return metrics
+
+
+def plot_attention_maps(attention_maps: List[torch.Tensor], save_path: str, title_suffix: str = ""):
+    """Plot attention maps to visualize diagonal patterns."""
+    
+    if not attention_maps:
+        return
+    
+    n_layers = len(attention_maps)
+    n_cols = min(3, n_layers)
+    n_rows = (n_layers + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+    if n_rows == 1 and n_cols == 1:
+        axes = [axes]
+    elif n_rows == 1 or n_cols == 1:
+        axes = axes.flatten()
+    else:
+        axes = axes.flatten()
+    
+    for i, attn_map in enumerate(attention_maps):
+        if i >= len(axes):
+            break
+            
+        ax = axes[i]
+        im = ax.imshow(attn_map.numpy(), cmap='Blues', aspect='auto')
+        ax.set_title(f'Layer {i+1} Attention{title_suffix}')
+        ax.set_xlabel('Key Position')
+        ax.set_ylabel('Query Position')
+        plt.colorbar(im, ax=ax)
+    
+    # Hide unused subplots
+    for i in range(n_layers, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def create_synthetic_data_with_patterns(vocab_size: int, seq_len: int, batch_size: int, device: torch.device):
+    """Create synthetic data with patterns that require global context."""
+    
+    data = []
+    for _ in range(batch_size):
+        seq = torch.randint(1, vocab_size-10, (seq_len,))  # Leave room for special tokens
+        
+        # Pattern 1: Long-range dependencies (token at pos 0 determines token at pos -1)
+        if seq[0] % 2 == 0:
+            seq[-1] = (seq[0] + 1) % vocab_size
+        
+        # Pattern 2: Nested structures (simple bracket matching)
+        open_bracket = vocab_size - 3
+        close_bracket = vocab_size - 2
+        
+        # Insert some bracket pairs
+        for i in range(0, seq_len-10, 20):
+            if i + 5 < seq_len:
+                seq[i] = open_bracket
+                seq[i + 5] = close_bracket
+        
+        data.append(seq)
+    
+    return torch.stack(data).to(device)
 
 
 # ==========================================
@@ -961,6 +1197,50 @@ def train_experiment(
             avg_loss = accum_loss_scalar / exp_config.grad_accum_steps
             losses.append(avg_loss)
             learning_rates.append(current_lr)
+            
+            # === DIAGONAL BLINDNESS MONITORING ===
+            # Monitor attention patterns for diagonal breaker experiments
+            diagonal_metrics = {}
+            if (step % 100 == 0 or step == exp_config.steps - 1) and exp_config.model_type == "pure_wave":
+                try:
+                    # Create test batch with patterns requiring global context
+                    test_batch = create_synthetic_data_with_patterns(
+                        model_config.vocab_size, 
+                        min(64, model_config.block_size),  # Smaller for attention analysis
+                        1, 
+                        device
+                    )
+                    
+                    # Extract attention maps
+                    attention_maps = extract_attention_maps(model, test_batch)
+                    
+                    if attention_maps:
+                        diagonal_metrics = analyze_diagonal_pattern(attention_maps)
+                        
+                        # Save attention maps at key checkpoints
+                        if experiment_dir and (step % 1000 == 0 or step == exp_config.steps - 1):
+                            attention_dir = os.path.join(experiment_dir, "attention_maps")
+                            os.makedirs(attention_dir, exist_ok=True)
+                            plot_attention_maps(
+                                attention_maps,
+                                os.path.join(attention_dir, f"attention_step_{step:05d}.png"),
+                                f" (Step {step})"
+                            )
+                        
+                        # Log diagonal metrics
+                        if 'avg_diagonal_ratio' in diagonal_metrics:
+                            console.print(f"   Diagonal: {diagonal_metrics['avg_diagonal_ratio']:.3f} | "
+                                        f"Long-range: {diagonal_metrics.get('avg_long_range_ratio', 0):.3f}")
+                            
+                            # Check if diagonal blindness is broken
+                            if step > 500 and diagonal_metrics['avg_diagonal_ratio'] < 0.7:
+                                console.print("[bold green]🎯 DIAGONAL BLINDNESS BROKEN![/bold green]")
+                
+                except Exception as e:
+                    # Don't fail training if attention analysis fails
+                    if step % 1000 == 0:  # Only log occasionally to avoid spam
+                        console.print(f"[yellow]⚠️ Attention analysis failed: {e}[/yellow]")
+            
             progress.update(task, advance=1, loss=avg_loss)
             
             # Verify loss continuity after resumption (first step only)
@@ -1161,6 +1441,17 @@ def run_ablation_suite(
     
     if experiments is None or "all" in experiments:
         experiments = list(ABLATION_EXPERIMENTS.keys())
+    elif "diagonal" in experiments:
+        # Diagonal breaker experiment group
+        diagonal_experiments = [
+            "diagonal_baseline",
+            "diagonal_breaker", 
+            "diagonal_overdrive_only",
+            "diagonal_fm_only",
+            "diagonal_interferometer_only"
+        ]
+        # Replace "diagonal" with actual experiment names
+        experiments = [exp for exp in experiments if exp != "diagonal"] + diagonal_experiments
     
     model_config = MODEL_CONFIGS[model_size]
     
@@ -1236,10 +1527,31 @@ def run_ablation_suite(
                 num_harmonics=model_config.num_harmonics,
                 block_size=model_config.block_size,
                 dropout=exp_config.dropout,
-                model_type="pure_wave"
+                model_type="pure_wave",
+                pure_wave_mode_v2=True,
+                # Non-Linear Physics Trinity (Diagonal Breaker)
+                use_overdrive=getattr(exp_config, 'use_overdrive', False),
+                use_fm_synthesis=getattr(exp_config, 'use_fm_synthesis', False),
+                use_interferometer=getattr(exp_config, 'use_interferometer', False),
+                mlp_expansion=getattr(exp_config, 'mlp_expansion', 1)
             )
             model = PureWaveGPT(wave_config).to(device)
-            console.print("[bold cyan]🌊 Using PURE WAVE GPT (Wave-to-Wave)[/bold cyan]")
+            
+            # Report Trinity status
+            trinity_enabled = any([
+                getattr(exp_config, 'use_overdrive', False),
+                getattr(exp_config, 'use_fm_synthesis', False), 
+                getattr(exp_config, 'use_interferometer', False)
+            ])
+            
+            if trinity_enabled:
+                console.print("[bold green]🌊⚡ PURE WAVE GPT + NON-LINEAR PHYSICS TRINITY[/bold green]")
+                console.print(f"   Overdrive: {'✅' if getattr(exp_config, 'use_overdrive', False) else '❌'}")
+                console.print(f"   FM Synthesis: {'✅' if getattr(exp_config, 'use_fm_synthesis', False) else '❌'}")
+                console.print(f"   Interferometer: {'✅' if getattr(exp_config, 'use_interferometer', False) else '❌'}")
+                console.print(f"   MLP Expansion: {getattr(exp_config, 'mlp_expansion', 1)}x")
+            else:
+                console.print("[bold cyan]🌊 PURE WAVE GPT (Baseline - No Trinity)[/bold cyan]")
             
         elif model_type == "wave":
             wave_config = WaveGPTConfig(
@@ -1514,8 +1826,8 @@ def print_detailed_stats(model, config, tokenizer_name, train_data, val_data, co
 def main():
     parser = argparse.ArgumentParser(description="Wave-Native GPT Experiment Suite")
     parser.add_argument("--experiment", type=str, nargs="+", default=["all"],
-                        choices=["all"] + list(ABLATION_EXPERIMENTS.keys()),
-                        help="Experiments to run")
+                        choices=["all", "diagonal"] + list(ABLATION_EXPERIMENTS.keys()),
+                        help="Experiments to run (use 'diagonal' for all diagonal breaker experiments)")
     parser.add_argument("--model", type=str, default="small",
                         choices=list(MODEL_CONFIGS.keys()),
                         help="Model size")
