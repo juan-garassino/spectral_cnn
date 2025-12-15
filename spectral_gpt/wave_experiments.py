@@ -318,6 +318,30 @@ ABLATION_EXPERIMENTS = {
         qfe_lambda=0.1
         # No batch_size_override needed - phasor decomposition is memory-efficient
     ),
+    
+    # ============================================================
+    # PURE WAVE GPT - Wave-to-Wave Throughout!
+    # ============================================================
+    # This is the novel architecture: NO EMBEDDINGS, pure wave physics
+    # Token → Wave → Wave → ... → Wave → Logits
+    
+    "pure_wave": ExperimentConfig(
+        name="🌊 PURE WAVE GPT (Wave-to-Wave)",
+        model_type="pure_wave",  # New model type!
+        use_rgd=False, use_qfe=False,
+        use_interference_attention=True,  # Always true for pure wave
+        lr=3e-4, dropout=0.1,
+        # Pure wave has different parameter structure
+    ),
+    
+    "pure_wave_full": ExperimentConfig(
+        name="🌊 PURE WAVE GPT + WaveOptim + QFE",
+        model_type="pure_wave",
+        use_rgd=True, use_qfe=True,
+        use_interference_attention=True,
+        lr=1e-3, dropout=0.0,
+        qfe_lambda=0.1
+    ),
 
     # ============================================================
     # SYSTEMATIC GRID SEARCH (2x2x2 = 8 experiments)
@@ -1121,7 +1145,26 @@ def run_ablation_suite(
         from monitoring import generate_experiment_id
         experiment_id = generate_experiment_id(exp_name)
         
-        if getattr(exp_config, 'model_type', 'wave') == "wave":
+        model_type = getattr(exp_config, 'model_type', 'wave')
+        
+        if model_type == "pure_wave":
+            # === PURE WAVE GPT - Wave-to-Wave Throughout! ===
+            from wave_gpt import PureWaveGPT
+            wave_config = WaveGPTConfig(
+                vocab_size=model_config.vocab_size,
+                d_model=model_config.d_model,
+                num_layers=model_config.num_layers,
+                num_heads=model_config.num_heads,
+                num_waves=model_config.num_waves,
+                num_harmonics=model_config.num_harmonics,
+                block_size=model_config.block_size,
+                dropout=exp_config.dropout,
+                model_type="pure_wave"
+            )
+            model = PureWaveGPT(wave_config).to(device)
+            console.print("[bold cyan]🌊 Using PURE WAVE GPT (Wave-to-Wave)[/bold cyan]")
+            
+        elif model_type == "wave":
             wave_config = WaveGPTConfig(
                 vocab_size=model_config.vocab_size,
                 d_model=model_config.d_model,
@@ -1137,6 +1180,7 @@ def run_ablation_suite(
                 use_interference_attention=getattr(exp_config, 'use_interference_attention', False),
                 model_type="wave"
             )
+            model = WaveGPT(wave_config).to(device)
         else:
              wave_config = WaveGPTConfig(
                 vocab_size=model_config.vocab_size,
@@ -1149,8 +1193,7 @@ def run_ablation_suite(
                 dropout=exp_config.dropout,
                 model_type="standard" # Flag for Standard
              )
-        
-        model = WaveGPT(wave_config).to(device)
+             model = WaveGPT(wave_config).to(device)
         
         # Count Parameters
         params = sum(p.numel() for p in model.parameters())

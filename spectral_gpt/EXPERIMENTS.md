@@ -58,6 +58,51 @@ Loss                       │ baseline     │                  │
 | `qfe_only` | Wave | Hybrid | AdamW | QFE | Does coherence loss help? |
 | `full_physics` | Wave | Hybrid | WaveOpt | QFE | Full wave stack (hybrid attention) |
 | `interference_full` | Wave | **Interference** | WaveOpt | QFE | **FULL PHYSICS** - Everything wave |
+| `pure_wave` | **Pure Wave** | **Pure Wave** | AdamW | CE | **🌊 PURE WAVE GPT** - Wave-to-wave throughout |
+| `pure_wave_full` | **Pure Wave** | **Pure Wave** | WaveOpt | QFE | **🌊 PURE WAVE + FULL PHYSICS** |
+
+---
+
+## 🌊 Pure Wave Architecture
+
+The `pure_wave` experiments test a completely new architecture:
+
+### **Traditional Transformer:**
+```
+Token → Embedding → Attention → Embedding → MLP → Embedding → Logits
+```
+
+### **Hybrid Wave (interference_attention):**
+```
+Token → Wave → Embedding → InterferenceAttn → Embedding → Wave → Logits
+```
+
+### **🌊 Pure Wave GPT:**
+```
+Token → Wave → WaveAttn → Wave → WaveMLP → Wave → Logits
+```
+
+**Key Differences:**
+- **No embedding space anywhere** - pure wave-to-wave computation
+- **Emergent attention patterns** from learned wave interference
+- **Learnable decay/re-emergence** from frequency beating
+- **All patterns emerge from physics** - no hardcoded structures
+
+### **Wave State Representation:**
+```python
+WaveState = {
+    freqs: (B, T, num_waves),           # Learned frequencies per token
+    phases: (B, T, num_waves),          # Learned phases per token  
+    amps: (B, T, num_waves, harmonics) # Learned harmonic amplitudes
+}
+```
+
+### **How Attention Emerges:**
+1. **Each token learns frequencies** via `freq_proj(wave_state)`
+2. **Phase evolution:** `θ(t) = ω*t + φ₀` (position = time)
+3. **Wave interference:** `I = A_Q² + A_K² + 2*A_Q*A_K*cos(Δφ)`
+4. **Beating patterns:** When `f₁ ≠ f₂`, attention oscillates with period `1/|f₁-f₂|`
+5. **Decay/re-emergence:** Network learns frequency differences for linguistic patterns
 
 ---
 
@@ -98,6 +143,27 @@ standard_transformer  vs  interference_full
 ```
 **Question:** Is the complete wave-native approach better?
 
+### 6. 🌊 Pure Wave vs Hybrid Wave
+```
+interference_attention  vs  pure_wave
+    (Hybrid Wave)         (Pure Wave)
+```
+**Question:** Does pure wave-to-wave beat hybrid wave-embedding-wave?
+
+### 7. 🌊 Pure Wave vs Standard
+```
+standard_transformer  vs  pure_wave
+    (Standard GPT)       (Pure Wave)
+```
+**Question:** Can pure wave physics match standard transformers?
+
+### 8. 🌊 Emergent Physics Test
+```
+pure_wave  vs  pure_wave_full
+ (AdamW)      (WaveOpt+QFE)
+```
+**Question:** Do emergent wave patterns improve with physics optimization?
+
 ---
 
 ## Results
@@ -111,6 +177,8 @@ standard_transformer  vs  interference_full
 | `qfe_only` | ? | ? | ? | ? |
 | `full_physics` | 7.86 | 2517 | 4,442 | ❌ Gibberish |
 | `interference_full` | ? | ? | ? | ? |
+| **`pure_wave`** | **?** | **?** | **?** | **🌊 PURE WAVE TEST** |
+| **`pure_wave_full`** | **?** | **?** | **?** | **🌊 PURE WAVE + PHYSICS** |
 
 ---
 
@@ -125,6 +193,13 @@ python wave_experiments.py --experiment standard_transformer wave_baseline --dat
 
 # Run all core experiments (the full grid)
 python wave_experiments.py --experiment standard_transformer wave_baseline interference_attention rgd_only qfe_only full_physics interference_full --dataset fineweb --steps 10000
+
+# 🌊 Run Pure Wave experiments
+python wave_experiments.py --experiment pure_wave --dataset fineweb --steps 10000
+python wave_experiments.py --experiment pure_wave_full --dataset fineweb --steps 10000
+
+# Compare Pure Wave vs others
+python wave_experiments.py --experiment standard_transformer interference_attention pure_wave --dataset fineweb --steps 10000
 ```
 
 ---
@@ -136,9 +211,20 @@ python wave_experiments.py --experiment standard_transformer wave_baseline inter
 - [ ] Interference attention (interference_attention beats wave_baseline?)
 - [ ] Physics optimizer (rgd_only beats wave_baseline?)
 - [ ] Coherence loss (qfe_only beats wave_baseline?)
+- [ ] **🌊 Pure wave architecture (pure_wave competitive with standard_transformer?)**
+- [ ] **🌊 Emergent wave patterns (pure_wave shows learnable decay/re-emergence?)**
 
 ### What Doesn't Work
 - [ ] (To be determined)
 
 ### Best Configuration
 - [ ] (To be determined from experiments)
+
+### 🌊 Pure Wave Hypothesis
+**If pure wave works, we should see:**
+1. **Frequency specialization:** Function words → low freq, content words → high freq
+2. **Emergent beating:** Attention patterns with periodic structure
+3. **Learned dependencies:** Beat periods matching linguistic distances
+4. **No hardcoded patterns:** All structure emerges from learned wave physics
+
+**Key test:** Does `pure_wave` match `standard_transformer` performance while showing emergent wave physics?
