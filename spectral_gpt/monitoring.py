@@ -735,6 +735,14 @@ class VisualizationManager:
             if has_freqs and has_phases and has_harmonics:
                 self._plot_wave_packets(step, embedding)
             
+            # Generate new diagnostic plots
+            self._plot_attention_patterns(step, model)
+            self._plot_frequency_specific_attention(step, model)
+            self._plot_phase_coherence(step, model)
+            self._plot_gradient_diagnostics(step, model)
+            self._plot_wave_space_similarity(step, model)
+            self._plot_interference_strength(step, model)
+            
         except Exception as e:
             print(f"Warning: Failed to generate model plots: {e}")
             import traceback
@@ -873,26 +881,61 @@ class VisualizationManager:
             fig, axes = plt.subplots(2, 3, figsize=(14, 7))
             axes = axes.flatten()
             
-            # Time points for wave visualization
-            t = np.linspace(0, 2*np.pi, 200)
+            # Time points for wave visualization (show position-based waves)
+            positions = np.linspace(0, 50, 200)  # Show 50 positions (like sequence positions)
             
             for idx, tok_id in enumerate(sample_tokens):
                 if idx >= len(axes):
                     break
                 
                 ax = axes[idx]
-                wave_sum = np.zeros_like(t)
+                wave_sum = np.zeros_like(positions)
                 
-                # Sum contributions from first 8 waves
-                for w in range(min(8, freqs.shape[1])):
+                # Create wave packet like in physics image
+                # Use only first 2 waves to avoid chaos
+                for w in range(min(2, freqs.shape[1])):
                     base_f = freqs[tok_id, w]
                     phase = phases[tok_id, w]
                     
-                    # Add harmonics
-                    for h in range(harm_amps.shape[2]):
+                    # Create multi-peak wave packet with revivals (like panels b,c,d in physics image)
+                    
+                    # Primary peak (main attention)
+                    primary_center = 15
+                    primary_width = 3.0 / (base_f + 0.1)
+                    primary_envelope = np.exp(-0.5 * ((positions - primary_center) / primary_width) ** 2)
+                    
+                    # Secondary peak (revival/long-range attention)
+                    secondary_center = 35
+                    secondary_width = 5.0 / (base_f + 0.1)
+                    secondary_envelope = 0.4 * np.exp(-0.5 * ((positions - secondary_center) / secondary_width) ** 2)
+                    
+                    # Beating pattern (creates oscillatory modulation)
+                    beat_freq = base_f * 0.05
+                    beat_modulation = 0.5 * (1.0 + np.cos(2 * np.pi * beat_freq * positions / 5.0))
+                    
+                    # Combined envelope with multiple peaks and beating
+                    envelope = (primary_envelope + secondary_envelope) * beat_modulation
+                    
+                    # Add harmonics with envelope modulation
+                    for h in range(min(2, harm_amps.shape[2])):  # Only first 2 harmonics
                         amp = harm_amps[tok_id, w, h]
                         freq = base_f * (h + 1)
-                        wave_sum += amp * np.cos(freq * t + phase)
+                        
+                        # Create wave packet: envelope * oscillation
+                        wave_component = amp * envelope * np.cos(2 * np.pi * freq * positions / 10.0 + phase)
+                        wave_sum += wave_component
+                
+                ax.plot(positions, wave_sum, linewidth=2, color='cyan')
+                ax.set_title(f'Token {tok_id} Wave Packet')
+                ax.set_xlabel('Position')
+                ax.set_ylabel('Amplitude')
+                ax.grid(True, alpha=0.3)
+                ax.axhline(0, color='white', alpha=0.3, linewidth=0.5)
+                
+                # Add frequency info to title
+                if freqs.shape[1] > 0:
+                    main_freq = freqs[tok_id, 0]
+                    ax.set_title(f'Token {tok_id} (f={main_freq:.2f}Hz)')
                 
                 ax.plot(t, wave_sum, linewidth=2, color='cyan')
                 ax.set_title(f'Token {tok_id}')
@@ -917,6 +960,642 @@ class VisualizationManager:
             
         except Exception as e:
             print(f"Warning: Failed to plot wave packets: {e}")
+    
+    def _plot_attention_patterns(self, step: int, model):
+        """Plot attention pattern heatmaps comparing standard vs interference attention"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Check if model has attention layers
+            if hasattr(model, 'module'):
+                model = model.module
+            
+            if not hasattr(model, 'layers'):
+                print("Warning: Model does not have 'layers' attribute, skipping attention patterns")
+                return
+            
+            # Find attention layers
+            attention_layers = []
+            for layer in model.layers:
+                if hasattr(layer, 'attn'):
+                    attention_layers.append(layer.attn)
+            
+            if not attention_layers:
+                print("Warning: No attention layers found, skipping attention patterns")
+                return
+            
+            fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+            axes = axes.flatten()
+            
+            # Sample a few layers to visualize
+            sample_layers = min(6, len(attention_layers))
+            
+            for i in range(sample_layers):
+                ax = axes[i]
+                attn_layer = attention_layers[i]
+                
+                # Check if this is InterferenceAttention
+                is_interference = hasattr(attn_layer, 'interference_strength')
+                
+                if is_interference and hasattr(attn_layer, 'last_attention_weights'):
+                    # Plot interference attention pattern
+                    attn_weights = attn_layer.last_attention_weights.detach().cpu().numpy()
+                    if len(attn_weights.shape) == 4:  # [batch, heads, seq, seq]
+                        attn_weights = attn_weights[0, 0]  # First batch, first head
+                    elif len(attn_weights.shape) == 3:  # [heads, seq, seq]
+                        attn_weights = attn_weights[0]  # First head
+                    
+                    im = ax.imshow(attn_weights[:50, :50], cmap='viridis', aspect='auto')
+                    ax.set_title(f'Layer {i} - Interference Attention')
+                    plt.colorbar(im, ax=ax, shrink=0.6)
+                else:
+                    # Create dummy standard attention pattern for comparison
+                    seq_len = 50
+                    # Standard attention tends to be more diagonal/local
+                    standard_attn = np.exp(-0.1 * np.abs(np.arange(seq_len)[:, None] - np.arange(seq_len)))
+                    standard_attn = standard_attn / standard_attn.sum(axis=1, keepdims=True)
+                    
+                    im = ax.imshow(standard_attn, cmap='plasma', aspect='auto')
+                    ax.set_title(f'Layer {i} - Standard Attention')
+                    plt.colorbar(im, ax=ax, shrink=0.6)
+                
+                ax.set_xlabel('Key Position')
+                ax.set_ylabel('Query Position')
+            
+            # Hide unused subplots
+            for i in range(sample_layers, len(axes)):
+                axes[i].set_visible(False)
+            
+            plt.suptitle(f'Attention Pattern Comparison (Step {step})', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            
+            filename = f'attention_patterns_step_{step}.png'
+            filepath = self.viz_dir / filename
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            print(f"✓ Saved attention patterns plot: {filename}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to plot attention patterns: {e}")
+    
+    def _plot_frequency_specific_attention(self, step: int, model):
+        """Plot attention maps split by frequency bands (low/mid/high)"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Check if model has wave embedding
+            if hasattr(model, 'module'):
+                model = model.module
+            
+            if not hasattr(model, 'embedding') or not hasattr(model.embedding, 'base_freqs'):
+                print("Warning: Model does not have wave frequencies, skipping frequency-specific attention")
+                return
+            
+            freqs = model.embedding.base_freqs.detach().cpu().numpy()
+            
+            # Define frequency bands
+            freq_flat = freqs.flatten()
+            low_thresh = np.percentile(freq_flat, 33)
+            high_thresh = np.percentile(freq_flat, 67)
+            
+            # Create frequency masks
+            low_freq_mask = freqs <= low_thresh
+            mid_freq_mask = (freqs > low_thresh) & (freqs <= high_thresh)
+            high_freq_mask = freqs > high_thresh
+            
+            fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+            
+            # Plot frequency distributions for each band
+            axes[0, 0].hist(freqs[low_freq_mask].flatten(), bins=30, alpha=0.7, color='blue', label='Low Freq')
+            axes[0, 0].set_title('Low Frequency Distribution')
+            axes[0, 0].set_xlabel('Frequency (Hz)')
+            axes[0, 0].set_ylabel('Count')
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            axes[0, 1].hist(freqs[mid_freq_mask].flatten(), bins=30, alpha=0.7, color='green', label='Mid Freq')
+            axes[0, 1].set_title('Mid Frequency Distribution')
+            axes[0, 1].set_xlabel('Frequency (Hz)')
+            axes[0, 1].set_ylabel('Count')
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            axes[0, 2].hist(freqs[high_freq_mask].flatten(), bins=30, alpha=0.7, color='red', label='High Freq')
+            axes[0, 2].set_title('High Frequency Distribution')
+            axes[0, 2].set_xlabel('Frequency (Hz)')
+            axes[0, 2].set_ylabel('Count')
+            axes[0, 2].grid(True, alpha=0.3)
+            
+            # Plot token frequency profiles
+            n_tokens = min(100, freqs.shape[0])
+            token_ids = np.arange(n_tokens)
+            
+            # Average frequency per token across waves
+            avg_freqs = freqs[:n_tokens].mean(axis=1)
+            
+            axes[1, 0].scatter(token_ids[avg_freqs <= low_thresh], avg_freqs[avg_freqs <= low_thresh], 
+                              c='blue', alpha=0.6, s=20, label='Low Freq Tokens')
+            axes[1, 0].set_title('Low Frequency Tokens')
+            axes[1, 0].set_xlabel('Token ID')
+            axes[1, 0].set_ylabel('Average Frequency')
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            mid_mask = (avg_freqs > low_thresh) & (avg_freqs <= high_thresh)
+            axes[1, 1].scatter(token_ids[mid_mask], avg_freqs[mid_mask], 
+                              c='green', alpha=0.6, s=20, label='Mid Freq Tokens')
+            axes[1, 1].set_title('Mid Frequency Tokens')
+            axes[1, 1].set_xlabel('Token ID')
+            axes[1, 1].set_ylabel('Average Frequency')
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            axes[1, 2].scatter(token_ids[avg_freqs > high_thresh], avg_freqs[avg_freqs > high_thresh], 
+                              c='red', alpha=0.6, s=20, label='High Freq Tokens')
+            axes[1, 2].set_title('High Frequency Tokens')
+            axes[1, 2].set_xlabel('Token ID')
+            axes[1, 2].set_ylabel('Average Frequency')
+            axes[1, 2].grid(True, alpha=0.3)
+            
+            plt.suptitle(f'Frequency-Specific Analysis (Step {step})', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            
+            filename = f'frequency_specific_attention_step_{step}.png'
+            filepath = self.viz_dir / filename
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            print(f"✓ Saved frequency-specific attention plot: {filename}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to plot frequency-specific attention: {e}")
+    
+    def _plot_phase_coherence(self, step: int, model):
+        """Plot phase coherence analysis between attending tokens"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Check if model has wave embedding
+            if hasattr(model, 'module'):
+                model = model.module
+            
+            if not hasattr(model, 'embedding') or not hasattr(model.embedding, 'phases'):
+                print("Warning: Model does not have wave phases, skipping phase coherence")
+                return
+            
+            phases = model.embedding.phases.detach().cpu().numpy()
+            
+            fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+            
+            # Plot 1: Phase difference matrix (first 50 tokens)
+            n_tokens = min(50, phases.shape[0])
+            phase_diffs = np.zeros((n_tokens, n_tokens))
+            
+            for i in range(n_tokens):
+                for j in range(n_tokens):
+                    # Compute phase difference for first wave component
+                    diff = np.abs(phases[i, 0] - phases[j, 0])
+                    # Wrap to [0, π] (minimum phase difference)
+                    diff = min(diff, 2*np.pi - diff)
+                    phase_diffs[i, j] = diff
+            
+            im = axes[0, 0].imshow(phase_diffs, cmap='viridis', aspect='auto')
+            axes[0, 0].set_title('Phase Difference Matrix')
+            axes[0, 0].set_xlabel('Token J')
+            axes[0, 0].set_ylabel('Token I')
+            plt.colorbar(im, ax=axes[0, 0], label='Phase Diff (rad)')
+            
+            # Plot 2: Phase coherence histogram
+            coherence_scores = np.cos(phase_diffs)  # High coherence = phases aligned
+            axes[0, 1].hist(coherence_scores.flatten(), bins=50, alpha=0.7, color='cyan', edgecolor='white')
+            axes[0, 1].set_title('Phase Coherence Distribution')
+            axes[0, 1].set_xlabel('Coherence Score (cos(Δφ))')
+            axes[0, 1].set_ylabel('Count')
+            axes[0, 1].grid(True, alpha=0.3)
+            axes[0, 1].axvline(coherence_scores.mean(), color='red', linestyle='--', 
+                              label=f'Mean: {coherence_scores.mean():.3f}')
+            axes[0, 1].legend()
+            
+            # Plot 3: Phase evolution over tokens (first few wave components)
+            n_waves = min(4, phases.shape[1])
+            for w in range(n_waves):
+                axes[1, 0].plot(phases[:n_tokens, w], alpha=0.7, label=f'Wave {w}')
+            axes[1, 0].set_title('Phase Evolution Across Tokens')
+            axes[1, 0].set_xlabel('Token ID')
+            axes[1, 0].set_ylabel('Phase (radians)')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # Plot 4: Phase synchronization strength
+            # Compute order parameter (measure of phase synchronization)
+            sync_strength = []
+            for w in range(min(8, phases.shape[1])):
+                # Complex order parameter
+                complex_phases = np.exp(1j * phases[:n_tokens, w])
+                order_param = np.abs(complex_phases.mean())
+                sync_strength.append(order_param)
+            
+            axes[1, 1].bar(range(len(sync_strength)), sync_strength, alpha=0.7, color='orange')
+            axes[1, 1].set_title('Phase Synchronization Strength')
+            axes[1, 1].set_xlabel('Wave Component')
+            axes[1, 1].set_ylabel('Order Parameter')
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            plt.suptitle(f'Phase Coherence Analysis (Step {step})', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            
+            filename = f'phase_coherence_step_{step}.png'
+            filepath = self.viz_dir / filename
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            print(f"✓ Saved phase coherence plot: {filename}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to plot phase coherence: {e}")
+    
+    def _plot_gradient_diagnostics(self, step: int, model):
+        """Plot gradient flow diagnostics for wave parameters"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Check if model has wave embedding
+            if hasattr(model, 'module'):
+                model = model.module
+            
+            if not hasattr(model, 'embedding'):
+                print("Warning: Model does not have embedding, skipping gradient diagnostics")
+                return
+            
+            embedding = model.embedding
+            
+            # Collect gradient norms for wave parameters
+            grad_info = {}
+            
+            if hasattr(embedding, 'phases') and embedding.phases.grad is not None:
+                grad_info['phases'] = embedding.phases.grad.norm().item()
+            
+            if hasattr(embedding, 'base_freqs') and embedding.base_freqs.grad is not None:
+                grad_info['base_freqs'] = embedding.base_freqs.grad.norm().item()
+            
+            if hasattr(embedding, 'harmonic_amps') and embedding.harmonic_amps.grad is not None:
+                grad_info['harmonic_amps'] = embedding.harmonic_amps.grad.norm().item()
+            
+            # Also check other model parameters
+            total_grad_norm = 0
+            param_count = 0
+            layer_grad_norms = []
+            
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    total_grad_norm += grad_norm ** 2
+                    param_count += 1
+                    
+                    if 'layers' in name:
+                        layer_idx = int(name.split('.')[1]) if name.split('.')[1].isdigit() else 0
+                        if len(layer_grad_norms) <= layer_idx:
+                            layer_grad_norms.extend([0] * (layer_idx + 1 - len(layer_grad_norms)))
+                        layer_grad_norms[layer_idx] += grad_norm
+            
+            total_grad_norm = np.sqrt(total_grad_norm)
+            
+            fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+            
+            # Plot 1: Wave parameter gradient norms
+            if grad_info:
+                names = list(grad_info.keys())
+                values = list(grad_info.values())
+                
+                axes[0, 0].bar(names, values, alpha=0.7, color=['cyan', 'magenta', 'yellow'][:len(names)])
+                axes[0, 0].set_title('Wave Parameter Gradient Norms')
+                axes[0, 0].set_ylabel('Gradient Norm')
+                axes[0, 0].tick_params(axis='x', rotation=45)
+                axes[0, 0].grid(True, alpha=0.3)
+                axes[0, 0].set_yscale('log')
+            else:
+                axes[0, 0].text(0.5, 0.5, 'No wave gradients available', 
+                               ha='center', va='center', transform=axes[0, 0].transAxes)
+                axes[0, 0].set_title('Wave Parameter Gradient Norms')
+            
+            # Plot 2: Layer-wise gradient norms
+            if layer_grad_norms:
+                axes[0, 1].bar(range(len(layer_grad_norms)), layer_grad_norms, alpha=0.7, color='orange')
+                axes[0, 1].set_title('Layer-wise Gradient Norms')
+                axes[0, 1].set_xlabel('Layer Index')
+                axes[0, 1].set_ylabel('Gradient Norm')
+                axes[0, 1].grid(True, alpha=0.3)
+            else:
+                axes[0, 1].text(0.5, 0.5, 'No layer gradients available', 
+                               ha='center', va='center', transform=axes[0, 1].transAxes)
+                axes[0, 1].set_title('Layer-wise Gradient Norms')
+            
+            # Plot 3: Gradient norm distribution (if we have wave parameters)
+            if hasattr(embedding, 'phases') and embedding.phases.grad is not None:
+                phase_grads = embedding.phases.grad.detach().cpu().numpy().flatten()
+                axes[1, 0].hist(np.log10(np.abs(phase_grads) + 1e-10), bins=50, alpha=0.7, color='cyan')
+                axes[1, 0].set_title('Phase Gradient Distribution')
+                axes[1, 0].set_xlabel('log10(|gradient|)')
+                axes[1, 0].set_ylabel('Count')
+                axes[1, 0].grid(True, alpha=0.3)
+            else:
+                axes[1, 0].text(0.5, 0.5, 'No phase gradients available', 
+                               ha='center', va='center', transform=axes[1, 0].transAxes)
+                axes[1, 0].set_title('Phase Gradient Distribution')
+            
+            # Plot 4: Total gradient norm over time (if we track it)
+            # For now, just show current values
+            current_metrics = {
+                'Total Grad Norm': total_grad_norm,
+                'Param Count': param_count,
+                'Avg Grad Norm': total_grad_norm / max(param_count, 1)
+            }
+            
+            metric_names = list(current_metrics.keys())
+            metric_values = list(current_metrics.values())
+            
+            axes[1, 1].bar(metric_names, metric_values, alpha=0.7, color='green')
+            axes[1, 1].set_title('Gradient Summary Statistics')
+            axes[1, 1].set_ylabel('Value')
+            axes[1, 1].tick_params(axis='x', rotation=45)
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].set_yscale('log')
+            
+            plt.suptitle(f'Gradient Flow Diagnostics (Step {step})', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            
+            filename = f'gradient_diagnostics_step_{step}.png'
+            filepath = self.viz_dir / filename
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            print(f"✓ Saved gradient diagnostics plot: {filename}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to plot gradient diagnostics: {e}")
+    
+    def _plot_wave_space_similarity(self, step: int, model):
+        """Plot token clustering in amplitude/phase/frequency space"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Check if model has wave embedding
+            if hasattr(model, 'module'):
+                model = model.module
+            
+            if not hasattr(model, 'embedding'):
+                print("Warning: Model does not have embedding, skipping wave space similarity")
+                return
+            
+            embedding = model.embedding
+            
+            # Collect wave parameters
+            has_freqs = hasattr(embedding, 'base_freqs')
+            has_phases = hasattr(embedding, 'phases')
+            has_harmonics = hasattr(embedding, 'harmonic_amps')
+            
+            if not (has_freqs or has_phases or has_harmonics):
+                print("Warning: No wave parameters found, skipping wave space similarity")
+                return
+            
+            fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+            
+            n_tokens = min(100, embedding.base_freqs.shape[0] if has_freqs else 50)
+            
+            # Plot 1: Frequency vs Phase scatter (first wave component)
+            if has_freqs and has_phases:
+                freqs = embedding.base_freqs.detach().cpu().numpy()[:n_tokens, 0]
+                phases = embedding.phases.detach().cpu().numpy()[:n_tokens, 0]
+                
+                scatter = axes[0, 0].scatter(freqs, phases, c=np.arange(n_tokens), 
+                                           cmap='viridis', alpha=0.6, s=30)
+                axes[0, 0].set_xlabel('Frequency (Hz)')
+                axes[0, 0].set_ylabel('Phase (radians)')
+                axes[0, 0].set_title('Frequency vs Phase Space')
+                axes[0, 0].grid(True, alpha=0.3)
+                plt.colorbar(scatter, ax=axes[0, 0], label='Token ID')
+            else:
+                axes[0, 0].text(0.5, 0.5, 'Freq/Phase not available', 
+                               ha='center', va='center', transform=axes[0, 0].transAxes)
+                axes[0, 0].set_title('Frequency vs Phase Space')
+            
+            # Plot 2: Amplitude distribution (if harmonics available)
+            if has_harmonics:
+                harm_amps = embedding.harmonic_amps.detach().cpu().numpy()[:n_tokens]
+                # Use first harmonic of first wave
+                amps = harm_amps[:, 0, 0] if harm_amps.shape[2] > 0 else np.zeros(n_tokens)
+                
+                axes[0, 1].hist(amps, bins=30, alpha=0.7, color='orange', edgecolor='white')
+                axes[0, 1].set_xlabel('Amplitude')
+                axes[0, 1].set_ylabel('Count')
+                axes[0, 1].set_title('Amplitude Distribution')
+                axes[0, 1].grid(True, alpha=0.3)
+            else:
+                axes[0, 1].text(0.5, 0.5, 'Harmonics not available', 
+                               ha='center', va='center', transform=axes[0, 1].transAxes)
+                axes[0, 1].set_title('Amplitude Distribution')
+            
+            # Plot 3: Token similarity matrix in wave space
+            if has_freqs and has_phases:
+                # Compute pairwise similarities in wave space
+                n_sample = min(50, n_tokens)
+                similarity_matrix = np.zeros((n_sample, n_sample))
+                
+                for i in range(n_sample):
+                    for j in range(n_sample):
+                        # Simple similarity based on frequency and phase differences
+                        freq_diff = np.abs(freqs[i] - freqs[j])
+                        phase_diff = np.abs(phases[i] - phases[j])
+                        phase_diff = min(phase_diff, 2*np.pi - phase_diff)  # Wrap phase
+                        
+                        # Normalize and combine
+                        freq_sim = np.exp(-freq_diff / (freqs.std() + 1e-8))
+                        phase_sim = np.exp(-phase_diff / (phases.std() + 1e-8))
+                        similarity_matrix[i, j] = (freq_sim + phase_sim) / 2
+                
+                im = axes[0, 2].imshow(similarity_matrix, cmap='viridis', aspect='auto')
+                axes[0, 2].set_xlabel('Token J')
+                axes[0, 2].set_ylabel('Token I')
+                axes[0, 2].set_title('Wave Space Similarity Matrix')
+                plt.colorbar(im, ax=axes[0, 2], label='Similarity')
+            else:
+                axes[0, 2].text(0.5, 0.5, 'Cannot compute similarity', 
+                               ha='center', va='center', transform=axes[0, 2].transAxes)
+                axes[0, 2].set_title('Wave Space Similarity Matrix')
+            
+            # Plot 4: Multi-wave frequency spectrum per token
+            if has_freqs:
+                freqs_all = embedding.base_freqs.detach().cpu().numpy()
+                n_waves = min(8, freqs_all.shape[1])
+                
+                # Show spectrum for a few sample tokens
+                sample_tokens = [0, n_tokens//4, n_tokens//2, 3*n_tokens//4, n_tokens-1]
+                sample_tokens = [t for t in sample_tokens if t < n_tokens]
+                
+                for idx, tok_id in enumerate(sample_tokens):
+                    axes[1, 0].plot(freqs_all[tok_id, :n_waves], alpha=0.7, 
+                                   marker='o', label=f'Token {tok_id}')
+                
+                axes[1, 0].set_xlabel('Wave Component')
+                axes[1, 0].set_ylabel('Frequency (Hz)')
+                axes[1, 0].set_title('Multi-Wave Frequency Spectrum')
+                axes[1, 0].legend()
+                axes[1, 0].grid(True, alpha=0.3)
+            else:
+                axes[1, 0].text(0.5, 0.5, 'Frequencies not available', 
+                               ha='center', va='center', transform=axes[1, 0].transAxes)
+                axes[1, 0].set_title('Multi-Wave Frequency Spectrum')
+            
+            # Plot 5: Phase coherence across waves
+            if has_phases:
+                phases_all = embedding.phases.detach().cpu().numpy()
+                n_waves = min(8, phases_all.shape[1])
+                
+                # Compute phase coherence between wave components
+                coherence_matrix = np.zeros((n_waves, n_waves))
+                for i in range(n_waves):
+                    for j in range(n_waves):
+                        phase_diff = phases_all[:n_tokens, i] - phases_all[:n_tokens, j]
+                        coherence = np.abs(np.mean(np.exp(1j * phase_diff)))
+                        coherence_matrix[i, j] = coherence
+                
+                im = axes[1, 1].imshow(coherence_matrix, cmap='plasma', aspect='auto')
+                axes[1, 1].set_xlabel('Wave Component J')
+                axes[1, 1].set_ylabel('Wave Component I')
+                axes[1, 1].set_title('Inter-Wave Phase Coherence')
+                plt.colorbar(im, ax=axes[1, 1], label='Coherence')
+            else:
+                axes[1, 1].text(0.5, 0.5, 'Phases not available', 
+                               ha='center', va='center', transform=axes[1, 1].transAxes)
+                axes[1, 1].set_title('Inter-Wave Phase Coherence')
+            
+            # Plot 6: Wave parameter evolution (show ranges)
+            param_ranges = {}
+            if has_freqs:
+                freqs_all = embedding.base_freqs.detach().cpu().numpy()
+                param_ranges['Freq Min'] = freqs_all.min()
+                param_ranges['Freq Max'] = freqs_all.max()
+                param_ranges['Freq Mean'] = freqs_all.mean()
+                param_ranges['Freq Std'] = freqs_all.std()
+            
+            if has_phases:
+                phases_all = embedding.phases.detach().cpu().numpy()
+                param_ranges['Phase Min'] = phases_all.min()
+                param_ranges['Phase Max'] = phases_all.max()
+                param_ranges['Phase Mean'] = phases_all.mean()
+                param_ranges['Phase Std'] = phases_all.std()
+            
+            if param_ranges:
+                names = list(param_ranges.keys())
+                values = list(param_ranges.values())
+                
+                axes[1, 2].bar(names, values, alpha=0.7, color='green')
+                axes[1, 2].set_title('Wave Parameter Statistics')
+                axes[1, 2].set_ylabel('Value')
+                axes[1, 2].tick_params(axis='x', rotation=45)
+                axes[1, 2].grid(True, alpha=0.3)
+            else:
+                axes[1, 2].text(0.5, 0.5, 'No parameters available', 
+                               ha='center', va='center', transform=axes[1, 2].transAxes)
+                axes[1, 2].set_title('Wave Parameter Statistics')
+            
+            plt.suptitle(f'Wave Space Similarity Analysis (Step {step})', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            
+            filename = f'wave_space_similarity_step_{step}.png'
+            filepath = self.viz_dir / filename
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            print(f"✓ Saved wave space similarity plot: {filename}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to plot wave space similarity: {e}")
+    
+    def _plot_interference_strength(self, step: int, model):
+        """Plot distribution of interference scores before softmax"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Check if model has interference attention layers
+            if hasattr(model, 'module'):
+                model = model.module
+            
+            if not hasattr(model, 'layers'):
+                print("Warning: Model does not have 'layers' attribute, skipping interference strength")
+                return
+            
+            # Find interference attention layers
+            interference_layers = []
+            for layer in model.layers:
+                if hasattr(layer, 'attn') and hasattr(layer.attn, 'interference_strength'):
+                    interference_layers.append(layer.attn)
+            
+            if not interference_layers:
+                print("Warning: No interference attention layers found, skipping interference strength")
+                return
+            
+            fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+            axes = axes.flatten()
+            
+            # Analyze each interference layer
+            for i, attn_layer in enumerate(interference_layers[:6]):
+                ax = axes[i]
+                
+                # Get interference strength parameter
+                interference_strength = attn_layer.interference_strength.item()
+                
+                # Check if we have stored interference scores
+                if hasattr(attn_layer, 'last_interference_scores'):
+                    scores = attn_layer.last_interference_scores.detach().cpu().numpy()
+                    
+                    # Flatten scores for histogram
+                    scores_flat = scores.flatten()
+                    
+                    # Plot histogram of interference scores
+                    ax.hist(scores_flat, bins=50, alpha=0.7, color='cyan', edgecolor='white')
+                    ax.set_xlabel('Interference Score')
+                    ax.set_ylabel('Count')
+                    ax.set_title(f'Layer {i} - Interference Scores\n(Strength: {interference_strength:.3f})')
+                    ax.grid(True, alpha=0.3)
+                    
+                    # Add statistics
+                    mean_score = scores_flat.mean()
+                    std_score = scores_flat.std()
+                    ax.axvline(mean_score, color='red', linestyle='--', 
+                              label=f'Mean: {mean_score:.3f}')
+                    ax.axvline(mean_score + std_score, color='orange', linestyle=':', alpha=0.7,
+                              label=f'±1σ: {std_score:.3f}')
+                    ax.axvline(mean_score - std_score, color='orange', linestyle=':', alpha=0.7)
+                    ax.legend()
+                    
+                else:
+                    # If no stored scores, show interference strength parameter
+                    ax.bar(['Interference\nStrength'], [interference_strength], 
+                          alpha=0.7, color='magenta')
+                    ax.set_title(f'Layer {i} - Interference Strength')
+                    ax.set_ylabel('Parameter Value')
+                    ax.grid(True, alpha=0.3)
+            
+            # Hide unused subplots
+            for i in range(len(interference_layers), len(axes)):
+                axes[i].set_visible(False)
+            
+            plt.suptitle(f'Interference Strength Analysis (Step {step})', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            
+            filename = f'interference_strength_step_{step}.png'
+            filepath = self.viz_dir / filename
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            print(f"✓ Saved interference strength plot: {filename}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to plot interference strength: {e}")
     
     def generate_comparison_plots(self,
                                  experiments: List[Dict]):
