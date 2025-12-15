@@ -224,6 +224,7 @@ class WavePacketEmbedding(nn.Module):
         # - Random base phase per token (allows learning unique token "signatures")
         # - Small wave-dependent offset (breaks symmetry between waves)
         
+        phi = (1 + math.sqrt(5)) / 2  # Golden ratio
         golden_angle = 2 * math.pi / (phi ** 2)
         
         # Random phase per token, plus small structured offset per wave
