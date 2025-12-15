@@ -34,6 +34,13 @@ class WaveGPTConfig:
     use_interference_attention: bool = False  # True = physics-based interference attention (Req 2.1-2.5)
     use_wave_embeddings: bool = True       # True = WavePacketEmbedding, False = StandardEmbedding (Req 7.5)
     pure_wave_mode_v2: bool = False        # True = PURE WAVE-TO-WAVE (no embeddings anywhere!)
+    
+    # === NON-LINEAR PHYSICS TRINITY (Breaks Linearity Plateau) ===
+    # These solve the problem of smooth sine waves being unable to model sharp logic
+    use_overdrive: bool = True       # Soft-clipping saturation → square waves (binary 0/1 states)
+    use_fm_synthesis: bool = True    # Frequency modulation → context shifts logic frequencies
+    use_interferometer: bool = True  # Phase-based gated residuals → boolean logic via interference
+    mlp_expansion: int = 4           # Hidden dimension multiplier (shifts params to reasoning core)
 
 # ==========================================
 # Standard Transformer Components (The Control)
@@ -446,7 +453,7 @@ class WavePacketEmbedding(nn.Module):
         # The token is "struck" and generates oscillations at its natural frequencies
         # No artificial envelopes - the wave shape emerges from harmonic superposition
         sin_waves = harm_a * torch.sin(wave_phase)  # (B, T, W, H)
-        cos_waves = harm_a * envelope * torch.cos(wave_phase)  # (B, T, W, H)
+        cos_waves = harm_a * torch.cos(wave_phase)  # (B, T, W, H)
         
         # === DIRECT PHASE PATHWAY for stronger gradients ===
         # The sin/cos pathway dilutes phase gradients. Add direct phase info.
@@ -1174,7 +1181,12 @@ class PureWaveGPT(nn.Module):
                 num_waves=config.num_waves,
                 num_harmonics=config.num_harmonics,
                 num_heads=config.num_heads,
-                dropout=config.dropout
+                dropout=config.dropout,
+                # Non-Linear Physics Trinity
+                use_overdrive=config.use_overdrive,
+                use_fm_synthesis=config.use_fm_synthesis,
+                use_interferometer=config.use_interferometer,
+                mlp_expansion=config.mlp_expansion
             )
             for _ in range(config.num_layers)
         ])
@@ -1470,18 +1482,42 @@ class WaveState:
 
 class PureWaveLayer(nn.Module):
     """
-    Pure Wave Transformer Layer.
+    Pure Wave Transformer Layer with Non-Linear Physics Trinity.
+    
+    UPGRADED ARCHITECTURE to break the "Linearity Plateau":
     
     Wave → Wave computation:
     1. Wave Interference Attention
-    2. Wave Residual Connection
-    3. Wave MLP (Resonance Filtering)
-    4. Wave Residual Connection
+    2. GATED Residual Connection (PhaseInterferometer - Logic NOT via π shift)
+    3. Wave FM Modulation (Context modulates Logic frequencies)
+    4. Wave MLP with Saturation (4x hidden, creates harmonics)
+    5. GATED Residual Connection
+    
+    The "Non-Linear Physics Trinity":
+    - WaveSaturation: tanh overdrive INSIDE MLP creates square-wave logic
+    - WaveFM: Low-freq context modulates high-freq logic frequencies
+    - PhaseInterferometer: Gated residuals via destructive interference
+    
+    This shifts parameter mass from I/O to the Reasoning Core.
     """
     
-    def __init__(self, num_waves, num_harmonics, num_heads, dropout=0.1):
+    def __init__(
+        self, 
+        num_waves, 
+        num_harmonics, 
+        num_heads, 
+        dropout=0.1,
+        use_overdrive: bool = True,      # Now ON by default
+        use_fm_synthesis: bool = True,   # Now ON by default
+        use_interferometer: bool = True, # Now ON by default
+        mlp_expansion: int = 4           # 4x hidden expansion (standard Transformer)
+    ):
         super().__init__()
         
+        self.num_waves = num_waves
+        self.num_harmonics = num_harmonics
+        
+        # === WAVE INTERFERENCE ATTENTION ===
         self.wave_attention = PureWaveInterference(
             num_waves=num_waves,
             num_harmonics=num_harmonics,
@@ -1489,38 +1525,185 @@ class PureWaveLayer(nn.Module):
             dropout=dropout
         )
         
+        # === FM MODULATION (Context → Logic frequency shift) ===
+        # Low-freq waves (0 to num_waves//4) modulate high-freq waves
+        self.use_fm = use_fm_synthesis
+        if use_fm_synthesis:
+            self.wave_fm = WaveFMContextual(num_waves, num_harmonics)
+        
+        # === UPGRADED MLP with Saturation & 4x Expansion ===
         self.wave_mlp = PureWaveMLP(
             num_waves=num_waves,
             num_harmonics=num_harmonics,
-            dropout=dropout
+            dropout=dropout,
+            use_overdrive=use_overdrive,
+            use_fm_synthesis=False,  # FM is now at layer level
+            use_interferometer=False,  # Interferometer is now gated residual
+            mlp_expansion=mlp_expansion  # 4x hidden!
         )
+        
+        # === PHASE INTERFEROMETER GATED RESIDUALS ===
+        # Replace standard residual with physics-based gating
+        self.use_gated_residual = use_interferometer
+        if use_interferometer:
+            self.attn_gate = PhaseInterferometerGate(num_waves, num_harmonics)
+            self.mlp_gate = PhaseInterferometerGate(num_waves, num_harmonics)
         
         # Wave normalization (RMS-style, preserves wave physics)
         self.norm1 = WaveRMSNorm(num_waves, num_harmonics)
         self.norm2 = WaveRMSNorm(num_waves, num_harmonics)
         
     def forward(self, wave_state: WaveState) -> WaveState:
-        """Wave → Wave transformation."""
+        """Wave → Wave transformation with Non-Linear Physics Trinity."""
         
-        # Normalize
+        # === ATTENTION BLOCK ===
         norm_state = self.norm1(wave_state)
-        
-        # Wave interference attention
         attn_state = self.wave_attention(norm_state)
         
-        # Residual in wave space
-        res_freqs = wave_state.freqs + attn_state.freqs
-        res_phases = wave_state.phases + attn_state.phases
-        res_amps = wave_state.amps + attn_state.amps
-        res_state = WaveState(res_freqs, res_phases, res_amps)
+        # GATED RESIDUAL (PhaseInterferometer) or standard residual
+        if self.use_gated_residual:
+            res_state = self.attn_gate(wave_state, attn_state)
+        else:
+            res_freqs = wave_state.freqs + attn_state.freqs
+            res_phases = wave_state.phases + attn_state.phases
+            res_amps = wave_state.amps + attn_state.amps
+            res_state = WaveState(res_freqs, res_phases, res_amps)
         
-        # Normalize again
+        # === FM MODULATION (Context shifts Logic frequencies) ===
+        if self.use_fm:
+            res_state = self.wave_fm(res_state)
+        
+        # === MLP BLOCK (with internal Saturation) ===
         norm_state2 = self.norm2(res_state)
-        
-        # Wave MLP
         mlp_state = self.wave_mlp(norm_state2)
         
-        # Final residual
+        # GATED RESIDUAL or standard residual
+        if self.use_gated_residual:
+            out_state = self.mlp_gate(res_state, mlp_state)
+        else:
+            out_freqs = res_state.freqs + mlp_state.freqs
+            out_phases = res_state.phases + mlp_state.phases
+            out_amps = res_state.amps + mlp_state.amps
+            out_state = WaveState(out_freqs, out_phases, out_amps)
+        
+        return out_state
+
+
+class WaveFMContextual(nn.Module):
+    """
+    Contextual FM Modulation - Low frequencies modulate high frequencies.
+    
+    Physics: freq_new = freq_old + modulation_index * low_freq_amplitude
+    
+    This allows "context" (low-freq global patterns) to physically shift
+    the "meaning" (frequency) of "logic" tokens (high-freq local patterns).
+    
+    Split: waves 0 to num_waves//4 are modulators, rest are carriers.
+    """
+    
+    def __init__(self, num_waves, num_harmonics):
+        super().__init__()
+        
+        self.num_waves = num_waves
+        self.num_harmonics = num_harmonics
+        
+        # Split: 25% modulators (low freq context), 75% carriers (high freq logic)
+        self.n_mod = max(1, num_waves // 4)
+        self.n_carrier = num_waves - self.n_mod
+        
+        # Learnable modulation index per carrier
+        self.mod_index = nn.Parameter(torch.ones(self.n_carrier) * 0.5)
+        
+        # Learnable routing: which modulators affect which carriers
+        # Shape: (n_carrier, n_mod) - each carrier gets weighted sum of modulators
+        self.mod_routing = nn.Parameter(
+            torch.randn(self.n_carrier, self.n_mod) * 0.1
+        )
+        
+    def forward(self, wave_state: WaveState) -> WaveState:
+        """Apply contextual FM: low-freq modulates high-freq."""
+        B, T, W = wave_state.freqs.shape
+        
+        # Split into modulators and carriers
+        mod_freqs = wave_state.freqs[..., :self.n_mod]      # (B, T, n_mod)
+        mod_amps = wave_state.amps[..., :self.n_mod, :]     # (B, T, n_mod, H)
+        
+        carrier_freqs = wave_state.freqs[..., self.n_mod:]  # (B, T, n_carrier)
+        
+        # Compute modulation signal: amplitude-weighted sum of modulator frequencies
+        # mod_signal = Σ (routing * mod_amp * mod_freq)
+        mod_amp_total = mod_amps.sum(dim=-1)  # (B, T, n_mod)
+        mod_signal = mod_amp_total * mod_freqs  # (B, T, n_mod)
+        
+        # Route to carriers: (B, T, n_mod) @ (n_mod, n_carrier) -> (B, T, n_carrier)
+        routed_mod = torch.matmul(mod_signal, self.mod_routing.T)
+        
+        # Apply FM: shift carrier frequencies
+        # freq_new = freq_old + mod_index * modulation_signal
+        modulated_freqs = carrier_freqs + self.mod_index * routed_mod
+        
+        # Reconstruct full frequency tensor
+        new_freqs = torch.cat([mod_freqs, modulated_freqs], dim=-1)
+        
+        # Phases and amplitudes unchanged in basic FM
+        return WaveState(new_freqs, wave_state.phases, wave_state.amps)
+
+
+class PhaseInterferometerGate(nn.Module):
+    """
+    Phase Interferometer Gated Residual - Logic via Destructive Interference.
+    
+    Replaces standard residual: out = input + delta
+    With gated residual: out = input + gate * delta
+    
+    Where gate is computed via phase interference:
+    - If control_phase ≈ 0 relative to input: constructive → gate ≈ 1 (PASS)
+    - If control_phase ≈ π relative to input: destructive → gate ≈ 0 (BLOCK/NOT)
+    
+    This enables true boolean logic via physics, not learned weights.
+    """
+    
+    def __init__(self, num_waves, num_harmonics):
+        super().__init__()
+        
+        self.num_waves = num_waves
+        self.num_harmonics = num_harmonics
+        
+        # Learnable control phase per wave (initialized near 0 = pass by default)
+        self.control_phase = nn.Parameter(torch.zeros(num_waves))
+        
+        # Gate sharpness (higher = more binary)
+        self.gate_sharpness = nn.Parameter(torch.ones(1) * 5.0)
+        
+        # Learnable gate bias
+        self.gate_bias = nn.Parameter(torch.zeros(num_waves))
+        
+    def forward(self, input_state: WaveState, delta_state: WaveState) -> WaveState:
+        """
+        Gated residual via phase interference.
+        
+        out = input + gate * delta
+        gate = f(cos(input_phase - control_phase))
+        """
+        # Compute phase difference between input and control
+        phase_diff = input_state.phases - self.control_phase  # (B, T, W)
+        
+        # Interference: cos(Δφ) gives constructive (+1) or destructive (-1)
+        interference = torch.cos(phase_diff)  # (B, T, W)
+        
+        # Convert to gate [0, 1] via sigmoid
+        # When interference = +1 (constructive): gate → 1
+        # When interference = -1 (destructive): gate → 0
+        gate = torch.sigmoid(
+            self.gate_sharpness * (interference + self.gate_bias)
+        )  # (B, T, W)
+        
+        # Apply gated residual
+        out_freqs = input_state.freqs + gate * delta_state.freqs
+        out_phases = input_state.phases + gate * delta_state.phases
+        out_amps = input_state.amps + gate.unsqueeze(-1) * delta_state.amps
+        
+        return WaveState(out_freqs, out_phases, out_amps)
         out_freqs = res_state.freqs + mlp_state.freqs
         out_phases = res_state.phases + mlp_state.phases
         out_amps = res_state.amps + mlp_state.amps
@@ -1757,64 +1940,398 @@ class PureWaveInterference(nn.Module):
         return WaveState(final_freqs, final_phases, final_amps)
 
 
-class PureWaveMLP(nn.Module):
+# ==========================================
+# Gibbs Phenomenon Solutions: Sharp Logic via Physics
+# ==========================================
+
+class WaveOverdrive(nn.Module):
     """
-    Wave-Native MLP (Resonance Filtering).
+    Overdrive Mechanism (Wave Saturation) - Solves Gibbs Phenomenon.
     
-    Operates directly on wave parameters:
-    - Frequency transformation (resonance coupling)
-    - Phase transformation (phase relationships)
-    - Amplitude transformation (energy redistribution)
+    Physics Principle: Analog saturation/clipping (like guitar amp overdrive).
+    
+    Mechanism: Push wave amplitudes through soft-clipping (tanh with learnable gain).
+    This turns smooth sine waves into approximate SQUARE WAVES (pulse trains).
+    
+    Goal: Physical way to represent binary 0/1 states using saturated waves.
+    
+    The key insight: tanh(gain * x) approaches sign(x) as gain → ∞
+    - Low gain: smooth, linear response
+    - High gain: sharp, square-wave-like response
     """
     
-    def __init__(self, num_waves, num_harmonics, dropout=0.1):
+    def __init__(self, num_waves, num_harmonics):
         super().__init__()
         
-        # Frequency MLP
-        self.freq_mlp = nn.Sequential(
-            nn.Linear(num_waves, 4 * num_waves),
-            nn.GELU(),
-            nn.Linear(4 * num_waves, num_waves),
-            nn.Dropout(dropout)
-        )
+        # Learnable gain per wave (controls sharpness)
+        # Initialize to moderate values - training will find optimal sharpness
+        self.amp_gain = nn.Parameter(torch.ones(num_waves, num_harmonics) * 2.0)
+        self.freq_gain = nn.Parameter(torch.ones(num_waves) * 1.5)
         
-        # Phase MLP
-        self.phase_mlp = nn.Sequential(
-            nn.Linear(num_waves, 4 * num_waves),
-            nn.GELU(),
-            nn.Linear(4 * num_waves, num_waves),
-            nn.Dropout(dropout)
-        )
+        # Learnable bias (DC offset before saturation)
+        self.amp_bias = nn.Parameter(torch.zeros(num_waves, num_harmonics))
+        self.freq_bias = nn.Parameter(torch.zeros(num_waves))
         
-        # Amplitude MLP
-        amp_dim = num_waves * num_harmonics
-        self.amp_mlp = nn.Sequential(
-            nn.Linear(amp_dim, 4 * amp_dim),
-            nn.GELU(),
-            nn.Linear(4 * amp_dim, amp_dim),
-            nn.Dropout(dropout)
-        )
+        # Output scaling (compensate for tanh compression)
+        self.amp_scale = nn.Parameter(torch.ones(num_waves, num_harmonics))
+        self.freq_scale = nn.Parameter(torch.ones(num_waves))
+        
+    def forward(self, wave_state: WaveState) -> WaveState:
+        """Apply soft-clipping saturation to create sharp transitions."""
+        # Saturate amplitudes: smooth → square-ish
+        saturated_amps = torch.tanh(
+            self.amp_gain * (wave_state.amps + self.amp_bias)
+        ) * self.amp_scale
+        
+        # Saturate frequencies (optional, creates frequency quantization)
+        saturated_freqs = torch.tanh(
+            self.freq_gain * (wave_state.freqs + self.freq_bias)
+        ) * self.freq_scale
+        
+        # Phases pass through unchanged (saturation doesn't apply to angles)
+        return WaveState(saturated_freqs, wave_state.phases, saturated_amps)
+
+
+class WaveFMSynthesis(nn.Module):
+    """
+    FM Synthesis (Frequency Modulation) - Solves Gibbs Phenomenon.
+    
+    Physics Principle: Frequency Modulation (like FM radio, Yamaha DX7).
+    
+    Mechanism: Low-frequency "modulator" waves modulate the frequency of 
+    high-frequency "carrier" waves. This creates complex sidebands and
+    sharp transients INSTANTLY without infinite harmonics.
+    
+    Goal: Context waves (low freq) can dynamically switch logic waves (high freq).
+    
+    FM equation: y(t) = A * sin(ω_c*t + β*sin(ω_m*t))
+    where β (modulation index) controls sideband richness.
+    """
+    
+    def __init__(self, num_waves, num_harmonics):
+        super().__init__()
         
         self.num_waves = num_waves
         self.num_harmonics = num_harmonics
         
-        # FIXED: Initialize MLP weights smaller for stability
-        with torch.no_grad():
-            for module in [self.freq_mlp, self.phase_mlp, self.amp_mlp]:
-                for layer in module:
-                    if isinstance(layer, nn.Linear):
-                        layer.weight.data *= 0.1
-                        if layer.bias is not None:
-                            layer.bias.data.zero_()
+        # Split waves into modulators (low freq) and carriers (high freq)
+        self.n_modulators = num_waves // 3  # ~33% are modulators
+        self.n_carriers = num_waves - self.n_modulators
+        
+        # Modulation index (β) - controls sideband richness
+        # Higher β = more sidebands = sharper transients
+        self.mod_index = nn.Parameter(torch.ones(self.n_carriers) * 2.0)
+        
+        # Modulation routing: which modulators affect which carriers
+        # Learnable mixing matrix
+        self.mod_routing = nn.Parameter(
+            torch.randn(self.n_carriers, self.n_modulators) * 0.5
+        )
+        
+        # Carrier frequency scaling
+        self.carrier_scale = nn.Parameter(torch.ones(self.n_carriers))
         
     def forward(self, wave_state: WaveState) -> WaveState:
+        """Apply FM synthesis: modulators modulate carrier frequencies."""
         B, T, W = wave_state.freqs.shape
         
-        new_freqs = self.freq_mlp(wave_state.freqs)
-        new_phases = self.phase_mlp(wave_state.phases)
+        # Split into modulators and carriers
+        mod_freqs = wave_state.freqs[..., :self.n_modulators]  # (B, T, n_mod)
+        mod_phases = wave_state.phases[..., :self.n_modulators]
+        mod_amps = wave_state.amps[..., :self.n_modulators, :]
         
-        amps_flat = wave_state.amps.view(B, T, -1)
-        new_amps = self.amp_mlp(amps_flat).view(B, T, W, -1)
+        carrier_freqs = wave_state.freqs[..., self.n_modulators:]  # (B, T, n_car)
+        carrier_phases = wave_state.phases[..., self.n_modulators:]
+        carrier_amps = wave_state.amps[..., self.n_modulators:, :]
+        
+        # Compute modulator signal: sum of modulator waves
+        # mod_signal = Σ A_m * sin(φ_m)  (simplified, using current phase)
+        mod_signal = (mod_amps.sum(dim=-1) * torch.sin(mod_phases))  # (B, T, n_mod)
+        
+        # Route modulation to carriers via learned routing matrix
+        # (B, T, n_mod) @ (n_mod, n_car).T -> (B, T, n_car)
+        routed_mod = torch.matmul(mod_signal, self.mod_routing.T)
+        
+        # Apply FM: modulate carrier phases
+        # New phase = original_phase + β * modulator_signal
+        fm_phase_shift = self.mod_index * routed_mod  # (B, T, n_car)
+        modulated_phases = carrier_phases + fm_phase_shift
+        
+        # Scale carrier frequencies (FM also affects perceived frequency)
+        modulated_freqs = carrier_freqs * self.carrier_scale
+        
+        # Reconstruct full wave state
+        new_freqs = torch.cat([mod_freqs, modulated_freqs], dim=-1)
+        new_phases = torch.cat([mod_phases, modulated_phases], dim=-1)
+        new_amps = wave_state.amps  # Amplitudes unchanged in basic FM
+        
+        return WaveState(new_freqs, new_phases, new_amps)
+
+
+class WaveInterferometerGate(nn.Module):
+    """
+    Interferometer Gate (Optical Logic) - Solves Gibbs Phenomenon.
+    
+    Physics Principle: Mach-Zehnder Interferometer (constructive/destructive interference).
+    
+    Mechanism: A "control" wave shifts a "signal" wave's phase by π (180°).
+    - Phase aligned (Δφ ≈ 0): Constructive interference → signal PASSES (Logic TRUE)
+    - Phase opposed (Δφ ≈ π): Destructive interference → signal CANCELS (Logic FALSE)
+    
+    Goal: True boolean logic (AND/OR/NOT) via phase cancellation, not multiplication.
+    
+    This is how optical computers work! Pure physics, no artificial gating.
+    """
+    
+    def __init__(self, num_waves, num_harmonics):
+        super().__init__()
+        
+        self.num_waves = num_waves
+        self.num_harmonics = num_harmonics
+        
+        # Split waves into control and signal
+        self.n_control = num_waves // 2
+        self.n_signal = num_waves - self.n_control
+        
+        # Learnable control-to-signal routing
+        # Determines which control waves gate which signal waves
+        self.gate_routing = nn.Parameter(
+            torch.eye(min(self.n_control, self.n_signal)).unsqueeze(0)
+        )
+        
+        # Phase shift amount (learnable, initialized to π for full cancellation)
+        self.phase_shift = nn.Parameter(torch.ones(self.n_signal) * math.pi)
+        
+        # Gate sharpness (how binary the gating is)
+        # Higher = sharper transition between pass/block
+        self.gate_sharpness = nn.Parameter(torch.ones(self.n_signal) * 5.0)
+        
+        # Bias for gate activation
+        self.gate_bias = nn.Parameter(torch.zeros(self.n_signal))
+        
+    def forward(self, wave_state: WaveState) -> WaveState:
+        """Apply interferometer gating: control waves gate signal waves."""
+        B, T, W = wave_state.freqs.shape
+        
+        # Split into control and signal waves
+        ctrl_amps = wave_state.amps[..., :self.n_control, :]  # (B, T, n_ctrl, H)
+        ctrl_phases = wave_state.phases[..., :self.n_control]  # (B, T, n_ctrl)
+        
+        sig_freqs = wave_state.freqs[..., self.n_control:]  # (B, T, n_sig)
+        sig_phases = wave_state.phases[..., self.n_control:]
+        sig_amps = wave_state.amps[..., self.n_control:, :]
+        
+        # Compute control signal strength (total amplitude of control waves)
+        ctrl_strength = ctrl_amps.sum(dim=-1)  # (B, T, n_ctrl)
+        
+        # Route control to signal via gate routing
+        # Expand routing for batch: (1, n_ctrl, n_sig) or learned
+        if self.gate_routing.shape[0] == 1:
+            routing = self.gate_routing.expand(1, self.n_control, self.n_signal)
+        else:
+            routing = self.gate_routing
+            
+        # Pad routing if dimensions don't match
+        if routing.shape[1] < self.n_control:
+            routing = F.pad(routing, (0, 0, 0, self.n_control - routing.shape[1]))
+        if routing.shape[2] < self.n_signal:
+            routing = F.pad(routing, (0, self.n_signal - routing.shape[2]))
+        routing = routing[:, :self.n_control, :self.n_signal]
+        
+        # Compute gate activation: how much each control affects each signal
+        # (B, T, n_ctrl) @ (1, n_ctrl, n_sig) -> (B, T, n_sig)
+        gate_activation = torch.matmul(
+            ctrl_strength.unsqueeze(-2),  # (B, T, 1, n_ctrl)
+            routing.transpose(-2, -1)      # (1, n_sig, n_ctrl) -> need (1, n_ctrl, n_sig)
+        ).squeeze(-2)  # (B, T, n_sig)
+        
+        # Apply sigmoid for smooth gating (0 = block, 1 = pass)
+        # gate = σ(sharpness * (activation - bias))
+        gate = torch.sigmoid(
+            self.gate_sharpness * (gate_activation + self.gate_bias)
+        )  # (B, T, n_sig)
+        
+        # Interferometer logic:
+        # - gate ≈ 1: no phase shift → constructive → signal passes
+        # - gate ≈ 0: π phase shift → destructive → signal cancels
+        
+        # Phase shift based on gate (inverted: low gate = high shift)
+        phase_shift = (1 - gate) * self.phase_shift  # (B, T, n_sig)
+        
+        # Apply phase shift to signal
+        gated_phases = sig_phases + phase_shift
+        
+        # Amplitude modulation via interference
+        # I = A₁² + A₂² + 2A₁A₂cos(Δφ)
+        # When Δφ = π, cos(π) = -1, so I = (A₁ - A₂)² → cancellation
+        # Simplified: amplitude scales with cos(phase_shift/2)²
+        interference_factor = torch.cos(phase_shift / 2).unsqueeze(-1) ** 2
+        gated_amps = sig_amps * interference_factor
+        
+        # Reconstruct: control waves pass through, signal waves are gated
+        ctrl_freqs = wave_state.freqs[..., :self.n_control]
+        ctrl_amps_full = wave_state.amps[..., :self.n_control, :]  # (B, T, n_ctrl, H)
+        
+        new_freqs = torch.cat([ctrl_freqs, sig_freqs], dim=-1)  # (B, T, W)
+        new_phases = torch.cat([wave_state.phases[..., :self.n_control], gated_phases], dim=-1)  # (B, T, W)
+        new_amps = torch.cat([ctrl_amps_full, gated_amps], dim=-2)  # (B, T, W, H) - concat on wave dim!
+        
+        return WaveState(new_freqs, new_phases, new_amps)
+
+
+class PureWaveMLP(nn.Module):
+    """
+    Wave-Native MLP with Non-Linear Physics - UPGRADED for Expressivity.
+    
+    KEY CHANGES to break "Linearity Plateau":
+    1. 4x hidden expansion (shifts params from I/O to reasoning core)
+    2. Saturation (tanh overdrive) INSIDE the MLP creates harmonics
+    3. Cross-parameter mixing (freqs influence phases, etc.)
+    
+    Architecture per parameter type:
+        input → Linear(D, 4D) → Saturation → GELU → Linear(4D, D) → output
+    
+    The Saturation layer creates square-wave-like responses that enable
+    sharp, contextual decisions instead of smooth interpolation.
+    """
+    
+    def __init__(
+        self, 
+        num_waves, 
+        num_harmonics, 
+        dropout=0.1,
+        use_overdrive: bool = True,      # Saturation ON by default
+        use_fm_synthesis: bool = False,  # FM now at layer level
+        use_interferometer: bool = False, # Interferometer now gated residual
+        mlp_expansion: int = 4           # 4x hidden expansion
+    ):
+        super().__init__()
+        
+        self.num_waves = num_waves
+        self.num_harmonics = num_harmonics
+        self.use_overdrive = use_overdrive
+        
+        # Hidden dimensions with 4x expansion
+        freq_hidden = num_waves * mlp_expansion
+        phase_hidden = num_waves * mlp_expansion
+        amp_dim = num_waves * num_harmonics
+        amp_hidden = amp_dim * mlp_expansion
+        
+        # === FREQUENCY MLP with Saturation ===
+        self.freq_up = nn.Linear(num_waves, freq_hidden)
+        self.freq_down = nn.Linear(freq_hidden, num_waves)
+        
+        # === PHASE MLP with Saturation ===
+        self.phase_up = nn.Linear(num_waves, phase_hidden)
+        self.phase_down = nn.Linear(phase_hidden, num_waves)
+        
+        # === AMPLITUDE MLP with Saturation (largest - most params) ===
+        self.amp_up = nn.Linear(amp_dim, amp_hidden)
+        self.amp_down = nn.Linear(amp_hidden, amp_dim)
+        
+        # === CROSS-PARAMETER MIXING ===
+        # Frequencies influence phases (physical: freq determines phase evolution)
+        self.freq_to_phase = nn.Linear(num_waves, num_waves)
+        # Amplitudes influence frequencies (physical: energy affects resonance)
+        self.amp_to_freq = nn.Linear(amp_dim, num_waves)
+        
+        # === SATURATION (Overdrive) PARAMETERS ===
+        if use_overdrive:
+            # Learnable gain per hidden unit (controls sharpness)
+            self.freq_gain = nn.Parameter(torch.ones(freq_hidden) * 2.0)
+            self.phase_gain = nn.Parameter(torch.ones(phase_hidden) * 2.0)
+            self.amp_gain = nn.Parameter(torch.ones(amp_hidden) * 2.0)
+            
+            # Learnable bias before saturation
+            self.freq_sat_bias = nn.Parameter(torch.zeros(freq_hidden))
+            self.phase_sat_bias = nn.Parameter(torch.zeros(phase_hidden))
+            self.amp_sat_bias = nn.Parameter(torch.zeros(amp_hidden))
+        
+        self.dropout = nn.Dropout(dropout)
+        
+        # Initialize for stability
+        self._init_weights()
+        
+    def _init_weights(self):
+        """Initialize weights for stable training."""
+        with torch.no_grad():
+            # Small initialization for up projections
+            for layer in [self.freq_up, self.phase_up, self.amp_up]:
+                layer.weight.data *= 0.1
+                if layer.bias is not None:
+                    layer.bias.data.zero_()
+            
+            # Even smaller for down projections (residual-friendly)
+            for layer in [self.freq_down, self.phase_down, self.amp_down]:
+                layer.weight.data *= 0.05
+                if layer.bias is not None:
+                    layer.bias.data.zero_()
+            
+            # Cross-parameter mixing starts small
+            self.freq_to_phase.weight.data *= 0.01
+            self.amp_to_freq.weight.data *= 0.01
+        
+    def _saturate(self, x, gain, bias):
+        """
+        Apply tanh saturation with learnable gain.
+        
+        tanh(gain * (x + bias)) approaches sign(x) as gain → ∞
+        This creates square-wave-like responses for sharp logic.
+        """
+        return torch.tanh(gain * (x + bias))
+    
+    def forward(self, wave_state: WaveState) -> WaveState:
+        B, T, W = wave_state.freqs.shape
+        H = self.num_harmonics
+        
+        # Flatten amplitudes
+        amps_flat = wave_state.amps.view(B, T, -1)  # (B, T, W*H)
+        
+        # === FREQUENCY PATH ===
+        # Up project
+        freq_h = self.freq_up(wave_state.freqs)  # (B, T, freq_hidden)
+        
+        # Saturation (creates harmonics, enables sharp decisions)
+        if self.use_overdrive:
+            freq_h = self._saturate(freq_h, self.freq_gain, self.freq_sat_bias)
+        
+        # Non-linearity
+        freq_h = F.gelu(freq_h)
+        freq_h = self.dropout(freq_h)
+        
+        # Down project
+        new_freqs = self.freq_down(freq_h)  # (B, T, W)
+        
+        # Cross-parameter: amplitudes influence frequencies
+        amp_influence = self.amp_to_freq(amps_flat)
+        new_freqs = new_freqs + 0.1 * amp_influence
+        
+        # === PHASE PATH ===
+        phase_h = self.phase_up(wave_state.phases)
+        
+        if self.use_overdrive:
+            phase_h = self._saturate(phase_h, self.phase_gain, self.phase_sat_bias)
+        
+        phase_h = F.gelu(phase_h)
+        phase_h = self.dropout(phase_h)
+        
+        new_phases = self.phase_down(phase_h)
+        
+        # Cross-parameter: frequencies influence phases
+        freq_influence = self.freq_to_phase(wave_state.freqs)
+        new_phases = new_phases + 0.1 * freq_influence
+        
+        # === AMPLITUDE PATH (largest, most expressive) ===
+        amp_h = self.amp_up(amps_flat)
+        
+        if self.use_overdrive:
+            amp_h = self._saturate(amp_h, self.amp_gain, self.amp_sat_bias)
+        
+        amp_h = F.gelu(amp_h)
+        amp_h = self.dropout(amp_h)
+        
+        new_amps_flat = self.amp_down(amp_h)
+        new_amps = new_amps_flat.view(B, T, W, H)
         
         return WaveState(new_freqs, new_phases, new_amps)
 
