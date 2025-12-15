@@ -463,23 +463,23 @@ class WaveInterferenceAttention(nn.Module):
 
 class InterferenceAttention(nn.Module):
     """
-    Wave Packet Interference Attention - The Brain as Oscillating Masses on Springs.
+    Pure Wave Interference Attention - Everything Emerges from Learned Waves.
     
-    Core insight: Attention should work like wave interference in physics:
-    - Each token emits a WAVE PACKET (not just a single wave)
-    - Wave packets have: envelope (localization) + oscillation (frequency content)
-    - Attention = interference pattern when wave packets meet
+    Core physics: When waves interfere, patterns emerge NATURALLY:
+    - Same frequency, same phase → Constructive (high attention)
+    - Same frequency, opposite phase → Destructive (low attention)  
+    - Different frequencies → BEATING (periodic rise and fall)
     
-    Multi-scale design (like wavelets):
-    - LOW frequency waves → GLOBAL attention (document-level context)
-    - HIGH frequency waves → LOCAL attention (word-level, spiky)
-    - BEATING patterns → periodic revivals (syntactic dependencies)
+    KEY INSIGHT: Decay and re-emergence are NOT hardcoded!
+    They emerge naturally from the interference of multiple learned frequencies.
     
-    The attention pattern should look like physics wave packets:
-    - Sharp spike at local position
-    - Decay with distance
-    - Revival peaks for related context
-    - Oscillatory modulation (beating)
+    When you have waves at frequencies f1 and f2, their interference creates
+    a beating pattern with period T = 1/|f1-f2|. This is pure physics!
+    
+    The network learns:
+    - Which frequencies each token should emit (via freq_proj)
+    - What phase relationships create useful attention (via phase_proj)
+    - How amplitudes weight different components (via amp_proj)
     
     Requirements: 2.1, 2.2, 2.3, 2.4, 2.5
     """
@@ -498,17 +498,11 @@ class InterferenceAttention(nn.Module):
         self.head_dim = d_model // num_heads
         self.num_waves = num_waves
         
-        # === Multi-scale frequency bands ===
-        # Split waves into low/mid/high frequency groups
-        self.n_low = num_waves // 2      # 50% low freq (global attention sea)
-        self.n_high = num_waves - self.n_low  # 50% high freq (local spikes)
-        
-        # === Wave packet parameters ===
-        # Each token projects to: frequency, phase, amplitude, envelope width
+        # === FULLY LEARNED wave parameters ===
+        # Each token projects to frequency, phase, amplitude - ALL LEARNED
         self.freq_proj = nn.Linear(d_model, num_heads * num_waves)
         self.phase_proj = nn.Linear(d_model, num_heads * num_waves)
         self.amp_proj = nn.Linear(d_model, num_heads * num_waves)
-        self.envelope_proj = nn.Linear(d_model, num_heads * num_waves)  # Wave packet width
         
         # Value projection
         self.v_proj = nn.Linear(d_model, d_model)
@@ -517,95 +511,78 @@ class InterferenceAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.eps = 1e-8
         
-        # === Learnable parameters for wave packet shape ===
+        # Learnable temperature for attention sharpness
         self.temperature = nn.Parameter(torch.ones(1))
-        
-        # Base frequencies for multi-scale (learnable but initialized with structure)
-        # Low frequencies: 0.1-1.0 (global), High frequencies: 1.0-10.0 (local spikes)
-        low_freqs = torch.linspace(0.1, 1.0, self.n_low)
-        high_freqs = torch.linspace(1.0, 10.0, self.n_high)
-        base_freqs = torch.cat([low_freqs, high_freqs])
-        self.register_buffer('base_freqs', base_freqs)  # (num_waves,)
-        
-        # Revival positions (learnable - where secondary attention peaks occur)
-        self.revival_strength = nn.Parameter(torch.tensor(0.3))  # How strong are revivals
-        self.revival_period = nn.Parameter(torch.tensor(10.0))   # Distance between revivals
         
         # Learnable interference strength
         self.interference_strength = nn.Parameter(torch.tensor(1.0))
         
+        # Initialize frequency projection bias to encourage multi-scale learning
+        # This is just initialization - the network learns the actual frequencies!
+        with torch.no_grad():
+            freq_init = torch.linspace(0.1, 5.0, num_waves).repeat(num_heads)
+            self.freq_proj.bias.data = freq_init
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Wave Packet Interference Attention.
+        Pure Wave Interference Attention.
         
-        Creates attention patterns that look like physics wave packets:
-        1. Primary spike at local position (strong local attention)
-        2. Exponential decay with distance
-        3. Revival peaks at periodic intervals (long-range dependencies)
-        4. Oscillatory modulation from frequency interference (beating)
+        Attention emerges ENTIRELY from wave physics:
+        1. Each token emits waves at LEARNED frequencies
+        2. Waves propagate with phase θ(t) = ω*t + φ_0
+        3. Interference pattern = attention scores
+        
+        Decay and re-emergence come from BEATING between frequencies!
+        No hardcoded envelopes - pure emergent physics.
         """
         B, T, C = x.shape
         device = x.device
         dtype = x.dtype
         
-        # === Project to wave packet parameters ===
-        freq_mod = self.freq_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
-        phase_0 = self.phase_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
-        amp = self.amp_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
-        envelope_width = self.envelope_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
+        # === Project to wave parameters (ALL LEARNED from data) ===
+        # Frequencies: positive, learned per token
+        freq = F.softplus(self.freq_proj(x)) + self.eps  # (B, T, H*W)
+        freq = freq.view(B, T, self.num_heads, self.num_waves).transpose(1, 2)  # (B, H, T, W)
         
-        # Physical constraints
-        amp = F.softplus(amp) + self.eps  # Positive amplitudes
-        envelope_width = F.softplus(envelope_width) + 0.5  # Minimum width of 0.5
+        # Phases: learned per token, unconstrained
+        phase = self.phase_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
         
-        # Modulate base frequencies (allow learning but keep multi-scale structure)
-        freq = self.base_freqs.view(1, 1, 1, -1) * (1.0 + 0.5 * torch.tanh(freq_mod))
+        # Amplitudes: positive, learned per token
+        amp = F.softplus(self.amp_proj(x)) + self.eps
+        amp = amp.view(B, T, self.num_heads, self.num_waves).transpose(1, 2)  # (B, H, T, W)
         
         # Value projection
         v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # === Compute position differences for wave packet interference ===
-        pos_q = torch.arange(T, device=device, dtype=dtype).view(1, 1, T, 1)  # Query positions
-        pos_k = torch.arange(T, device=device, dtype=dtype).view(1, 1, 1, T)  # Key positions
-        delta_pos = pos_q - pos_k  # (1, 1, T, T) - position difference
+        # === WAVE INTERFERENCE (Pure Physics!) ===
+        # Position indices for phase evolution
+        positions = torch.arange(T, device=device, dtype=dtype)
         
-        # === WAVE PACKET ENVELOPE ===
-        # Primary envelope: Gaussian centered at query position
-        # Width depends on frequency (high freq = narrow spike, low freq = broad)
-        avg_width = envelope_width.mean(dim=-1, keepdim=True)  # (B, H, T, 1)
-        primary_envelope = torch.exp(-0.5 * (delta_pos / avg_width) ** 2)  # (B, H, T, T)
+        # Phase at each position: θ(t) = ω*t + φ_0
+        # Different frequencies create different phase evolution rates!
+        theta = freq * positions.view(1, 1, T, 1) + phase  # (B, H, T, W)
         
-        # Revival envelope: Secondary peaks at periodic intervals
-        revival_dist = torch.abs(delta_pos) % self.revival_period
-        revival_envelope = self.revival_strength * torch.exp(-0.5 * (revival_dist / (avg_width * 2)) ** 2)
+        # Create complex phasors: A * e^(iθ)
+        # This encodes both amplitude and phase in one complex number
+        phasor = amp * torch.exp(1j * theta.to(torch.complex64))  # (B, H, T, W)
         
-        # Combined envelope (primary + revivals)
-        envelope = primary_envelope + revival_envelope  # (B, H, T, T)
+        # === INTERFERENCE PATTERN ===
+        # When query phasor meets key phasor, they interfere:
+        # score[q,k] = Re(sum_w(phasor_q[w] * conj(phasor_k[w])))
+        #            = sum_w(A_q * A_k * cos(θ_q - θ_k))
+        #
+        # This NATURALLY creates:
+        # - High scores when phases align (constructive interference)
+        # - Low scores when phases oppose (destructive interference)
+        # - BEATING patterns when frequencies differ!
+        #   Beat period = 2π / |ω_q - ω_k| → learned from data!
         
-        # === OSCILLATORY INTERFERENCE ===
-        # Phase evolution: θ(t) = ω*t + φ_0
-        theta_q = freq * pos_q + phase_0  # (B, H, T, W)
-        theta_k = freq * pos_k.unsqueeze(-1) + phase_0.unsqueeze(2)  # (B, H, 1, T, W) -> broadcast
+        # Efficient computation via matrix multiply
+        interference = torch.matmul(phasor, phasor.conj().transpose(-2, -1)).real  # (B, H, T, T)
+        interference = interference / (self.num_waves ** 0.5)  # Scale like standard attention
         
-        # Phase difference creates interference pattern
-        # Reshape for broadcasting: theta_q (B,H,T,1,W), theta_k (B,H,1,T,W)
-        theta_q_exp = theta_q.unsqueeze(3)  # (B, H, T, 1, W)
-        theta_k_exp = theta_k.transpose(2, 3)  # (B, H, T, 1, W) - need to fix shape
-        
-        # Actually compute phasors more efficiently
-        phasor_q = amp * torch.exp(1j * theta_q.to(torch.complex64))  # (B, H, T, W)
-        phasor_k = amp * torch.exp(1j * theta_q.to(torch.complex64))  # Use same theta for k
-        
-        # Interference = Re(phasor_q @ phasor_k^H)
-        interference = torch.matmul(phasor_q, phasor_k.conj().transpose(-2, -1)).real  # (B, H, T, T)
-        interference = interference / (self.num_waves ** 0.5)
-        
-        # === COMBINE: Envelope × Interference ===
-        # This creates wave packets: localized oscillations with revivals
-        scores = envelope * (1.0 + self.interference_strength * interference)
-        
-        # Temperature scaling
-        scores = scores * self.temperature
+        # Scale by learned parameters
+        scores = self.interference_strength * interference * self.temperature
         
         # === Causal masking ===
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
@@ -617,8 +594,10 @@ class InterferenceAttention(nn.Module):
         
         # Store for visualization
         self.last_attention_weights = attn_weights.detach()
-        self.last_envelope = envelope.detach()
         self.last_interference = interference.detach()
+        self.last_frequencies = freq.detach()
+        self.last_phases = phase.detach()
+        self.last_amplitudes = amp.detach()
         
         # Apply to values
         out = torch.matmul(attn_weights, v)  # (B, H, T, D)
@@ -630,14 +609,12 @@ class InterferenceAttention(nn.Module):
         return out
     
     def get_interference_pattern(self, x: torch.Tensor) -> torch.Tensor:
-        """Get raw wave packet interference scores for visualization."""
-        # Run forward to populate cached values
+        """Get raw wave interference scores for visualization."""
         with torch.no_grad():
             _ = self.forward(x)
         
-        if hasattr(self, 'last_envelope') and hasattr(self, 'last_interference'):
-            # Return combined envelope × interference pattern
-            return self.last_envelope * (1.0 + self.interference_strength * self.last_interference)
+        if hasattr(self, 'last_interference'):
+            return self.last_interference
         else:
             return torch.zeros(x.size(0), self.num_heads, x.size(1), x.size(1), device=x.device)
     
@@ -652,21 +629,19 @@ class InterferenceAttention(nn.Module):
             T = x.size(1)
             return torch.zeros(x.size(0), self.num_heads, T, T, device=x.device)
     
-    def get_wave_packet_components(self, x: torch.Tensor) -> dict:
-        """Get individual wave packet components for detailed visualization."""
+    def get_wave_components(self, x: torch.Tensor) -> dict:
+        """Get learned wave components for visualization."""
         with torch.no_grad():
             _ = self.forward(x)
         
         return {
-            'envelope': self.last_envelope if hasattr(self, 'last_envelope') else None,
+            'frequencies': self.last_frequencies if hasattr(self, 'last_frequencies') else None,
+            'phases': self.last_phases if hasattr(self, 'last_phases') else None,
+            'amplitudes': self.last_amplitudes if hasattr(self, 'last_amplitudes') else None,
             'interference': self.last_interference if hasattr(self, 'last_interference') else None,
             'attention_weights': self.last_attention_weights if hasattr(self, 'last_attention_weights') else None,
-            'revival_strength': self.revival_strength.item(),
-            'revival_period': self.revival_period.item(),
-            'interference_strength': self.interference_strength.item()
         }
-
-
+    
 # ==========================================
 # PURE Wave Attention (NO SOFTMAX!)
 # ==========================================
