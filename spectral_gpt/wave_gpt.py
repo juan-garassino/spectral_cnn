@@ -2253,23 +2253,27 @@ class PureWaveMLP(nn.Module):
         self._init_weights()
         
     def _init_weights(self):
-        """Initialize weights for stable training."""
+        """Initialize weights for stable training with proper scale."""
         with torch.no_grad():
-            # Small initialization for up projections
+            # Standard Xavier/Glorot initialization for up projections
+            # This ensures gradients flow properly through the network
             for layer in [self.freq_up, self.phase_up, self.amp_up]:
-                layer.weight.data *= 0.1
+                nn.init.xavier_uniform_(layer.weight)
                 if layer.bias is not None:
                     layer.bias.data.zero_()
             
-            # Even smaller for down projections (residual-friendly)
+            # Smaller for down projections (residual-friendly, but not too small)
             for layer in [self.freq_down, self.phase_down, self.amp_down]:
-                layer.weight.data *= 0.05
+                nn.init.xavier_uniform_(layer.weight)
+                layer.weight.data *= 0.5  # Slightly smaller for residual
                 if layer.bias is not None:
                     layer.bias.data.zero_()
             
-            # Cross-parameter mixing starts small
-            self.freq_to_phase.weight.data *= 0.01
-            self.amp_to_freq.weight.data *= 0.01
+            # Cross-parameter mixing - moderate initialization
+            nn.init.xavier_uniform_(self.freq_to_phase.weight)
+            self.freq_to_phase.weight.data *= 0.1
+            nn.init.xavier_uniform_(self.amp_to_freq.weight)
+            self.amp_to_freq.weight.data *= 0.1
         
     def _saturate(self, x, gain, bias):
         """
@@ -2438,14 +2442,24 @@ class WaveCollapse(nn.Module):
         self._init_weights()
         
     def _init_weights(self):
-        """Initialize weights for stability"""
+        """Initialize weights with proper scaling for gradient flow."""
         for module in [self.freq_processor, self.phase_processor, self.amp_processor, 
-                      self.harmonic_analyzer, self.collapse_proj]:
+                      self.harmonic_analyzer]:
             for layer in module:
                 if isinstance(layer, nn.Linear):
-                    layer.weight.data *= 0.1
+                    nn.init.xavier_uniform_(layer.weight)
                     if layer.bias is not None:
                         layer.bias.data.zero_()
+        
+        # Final projection needs careful initialization
+        for layer in self.collapse_proj:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                # Scale down the final layer for stable logits
+                if layer.out_features > 1000:  # This is the vocab projection
+                    layer.weight.data *= 0.1
+                if layer.bias is not None:
+                    layer.bias.data.zero_()
         
     def forward(self, wave_state: WaveState) -> torch.Tensor:
         B, T, W = wave_state.freqs.shape

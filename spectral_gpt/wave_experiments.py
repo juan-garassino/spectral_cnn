@@ -461,10 +461,12 @@ ABLATION_EXPERIMENTS = {
     "diagonal_breaker": ExperimentConfig(
         name="Non-Linear Physics Trinity (Diagonal Breaker)",
         model_type="pure_wave", 
-        use_rgd=True, use_qfe=True,
-        lr=3e-4, dropout=0.1,
+        use_rgd=False,  # Use AdamW for reliable convergence
+        use_qfe=False,  # Disable QFE initially - let model learn freely
+        lr=1e-3,  # Higher LR for faster learning
+        dropout=0.1,
         steps=5000,
-        qfe_lambda=0.05,
+        qfe_lambda=0.01,  # Lower if enabled later
         # Trinity enabled - should break diagonal blindness
         use_overdrive=True,
         use_fm_synthesis=True,
@@ -515,10 +517,12 @@ ABLATION_EXPERIMENTS = {
     "diagonal_quick": ExperimentConfig(
         name="Quick Diagonal Test (Trinity)",
         model_type="pure_wave",
-        use_rgd=True, use_qfe=True,
-        lr=3e-4, dropout=0.1,
+        use_rgd=False,  # Use AdamW for faster convergence initially
+        use_qfe=False,  # Disable QFE to let model learn freely first
+        lr=1e-3,  # Higher LR for faster learning
+        dropout=0.1,
         steps=1000,  # Quick test
-        qfe_lambda=0.05,
+        qfe_lambda=0.01,  # Lower if enabled
         use_overdrive=True,
         use_fm_synthesis=True,
         use_interferometer=True,
