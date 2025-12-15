@@ -714,7 +714,13 @@ class VisualizationManager:
             # Check for required wave attributes
             has_freqs = hasattr(embedding, 'base_freqs')
             has_phases = hasattr(embedding, 'phases')
-            has_harmonics = hasattr(embedding, 'harmonic_amps')
+            # Handle both WavePacketEmbedding (harmonic_amps) and PureWaveExcitation (amplitudes)
+            has_harmonics = hasattr(embedding, 'harmonic_amps') or hasattr(embedding, 'amplitudes')
+            
+            # Debug: Print what attributes are available
+            if not has_harmonics:
+                available_attrs = [attr for attr in dir(embedding) if not attr.startswith('_')]
+                print(f"Debug: Available embedding attributes: {available_attrs}")
             
             if not (has_freqs or has_phases or has_harmonics):
                 print(f"Warning: Model embedding does not have wave attributes, skipping model plots")
@@ -829,7 +835,14 @@ class VisualizationManager:
             import matplotlib.pyplot as plt
             import numpy as np
             
-            harm_amps = embedding.harmonic_amps.detach().cpu().numpy()
+            # Handle both WavePacketEmbedding (harmonic_amps) and PureWaveExcitation (amplitudes)
+            if hasattr(embedding, 'harmonic_amps'):
+                harm_amps = embedding.harmonic_amps.detach().cpu().numpy()
+            elif hasattr(embedding, 'amplitudes'):
+                harm_amps = embedding.amplitudes.detach().cpu().numpy()
+            else:
+                print("Warning: No harmonic amplitudes found, skipping harmonics plot")
+                return
             
             fig, axes = plt.subplots(1, 2, figsize=(14, 5))
             
@@ -871,7 +884,15 @@ class VisualizationManager:
             
             freqs = embedding.base_freqs.detach().cpu().numpy()
             phases = embedding.phases.detach().cpu().numpy()
-            harm_amps = embedding.harmonic_amps.detach().cpu().numpy()
+            
+            # Handle both WavePacketEmbedding (harmonic_amps) and PureWaveExcitation (amplitudes)
+            if hasattr(embedding, 'harmonic_amps'):
+                harm_amps = embedding.harmonic_amps.detach().cpu().numpy()
+            elif hasattr(embedding, 'amplitudes'):
+                harm_amps = embedding.amplitudes.detach().cpu().numpy()
+            else:
+                print("Warning: No harmonic amplitudes found, skipping wave packets plot")
+                return
             
             # Sample tokens to visualize
             n_tokens = freqs.shape[0]
@@ -972,15 +993,22 @@ class VisualizationManager:
             if hasattr(model, 'module'):
                 model = model.module
             
-            if not hasattr(model, 'layers'):
-                print("Warning: Model does not have 'layers' attribute, skipping attention patterns")
+            # Handle both WaveGPT (layers) and PureWaveGPT (wave_layers)
+            if hasattr(model, 'layers'):
+                layers = model.layers
+            elif hasattr(model, 'wave_layers'):
+                layers = model.wave_layers
+            else:
+                print("Warning: Model does not have 'layers' or 'wave_layers' attribute, skipping attention patterns")
                 return
             
             # Find attention layers
             attention_layers = []
-            for layer in model.layers:
+            for layer in layers:
                 if hasattr(layer, 'attn'):
                     attention_layers.append(layer.attn)
+                elif hasattr(layer, 'wave_attention'):  # PureWaveGPT uses wave_attention
+                    attention_layers.append(layer.wave_attention)
             
             if not attention_layers:
                 print("Warning: No attention layers found, skipping attention patterns")
@@ -1249,8 +1277,11 @@ class VisualizationManager:
             if hasattr(embedding, 'base_freqs') and embedding.base_freqs.grad is not None:
                 grad_info['base_freqs'] = embedding.base_freqs.grad.norm().item()
             
+            # Handle both WavePacketEmbedding (harmonic_amps) and PureWaveExcitation (amplitudes)
             if hasattr(embedding, 'harmonic_amps') and embedding.harmonic_amps.grad is not None:
                 grad_info['harmonic_amps'] = embedding.harmonic_amps.grad.norm().item()
+            elif hasattr(embedding, 'amplitudes') and embedding.amplitudes.grad is not None:
+                grad_info['amplitudes'] = embedding.amplitudes.grad.norm().item()
             
             # Also check other model parameters
             total_grad_norm = 0
@@ -1367,7 +1398,8 @@ class VisualizationManager:
             # Collect wave parameters
             has_freqs = hasattr(embedding, 'base_freqs')
             has_phases = hasattr(embedding, 'phases')
-            has_harmonics = hasattr(embedding, 'harmonic_amps')
+            # Handle both WavePacketEmbedding (harmonic_amps) and PureWaveExcitation (amplitudes)
+            has_harmonics = hasattr(embedding, 'harmonic_amps') or hasattr(embedding, 'amplitudes')
             
             if not (has_freqs or has_phases or has_harmonics):
                 print("Warning: No wave parameters found, skipping wave space similarity")
@@ -1396,7 +1428,14 @@ class VisualizationManager:
             
             # Plot 2: Amplitude distribution (if harmonics available)
             if has_harmonics:
-                harm_amps = embedding.harmonic_amps.detach().cpu().numpy()[:n_tokens]
+                # Handle both WavePacketEmbedding (harmonic_amps) and PureWaveExcitation (amplitudes)
+                if hasattr(embedding, 'harmonic_amps'):
+                    harm_amps = embedding.harmonic_amps.detach().cpu().numpy()[:n_tokens]
+                elif hasattr(embedding, 'amplitudes'):
+                    harm_amps = embedding.amplitudes.detach().cpu().numpy()[:n_tokens]
+                else:
+                    harm_amps = np.zeros((n_tokens, 1, 1))
+                
                 # Use first harmonic of first wave
                 amps = harm_amps[:, 0, 0] if harm_amps.shape[2] > 0 else np.zeros(n_tokens)
                 
@@ -1537,15 +1576,22 @@ class VisualizationManager:
             if hasattr(model, 'module'):
                 model = model.module
             
-            if not hasattr(model, 'layers'):
-                print("Warning: Model does not have 'layers' attribute, skipping interference strength")
+            # Handle both WaveGPT (layers) and PureWaveGPT (wave_layers)
+            if hasattr(model, 'layers'):
+                layers = model.layers
+            elif hasattr(model, 'wave_layers'):
+                layers = model.wave_layers
+            else:
+                print("Warning: Model does not have 'layers' or 'wave_layers' attribute, skipping interference strength")
                 return
             
             # Find interference attention layers
             interference_layers = []
-            for layer in model.layers:
+            for layer in layers:
                 if hasattr(layer, 'attn') and hasattr(layer.attn, 'interference_strength'):
                     interference_layers.append(layer.attn)
+                elif hasattr(layer, 'wave_attention') and hasattr(layer.wave_attention, 'interference_strength'):  # PureWaveGPT
+                    interference_layers.append(layer.wave_attention)
             
             if not interference_layers:
                 print("Warning: No interference attention layers found, skipping interference strength")

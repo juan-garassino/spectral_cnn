@@ -24,6 +24,8 @@ import json
 import time
 import math
 import argparse
+import zipfile
+import shutil
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, List, Tuple
 import tiktoken # GPT-2 Tokenizer
@@ -326,12 +328,13 @@ ABLATION_EXPERIMENTS = {
     # Token → Wave → Wave → ... → Wave → Logits
     
     "pure_wave": ExperimentConfig(
-        name="🌊 PURE WAVE GPT (Wave-to-Wave)",
+        name="🌊 PURE WAVE GPT (Wave-to-Wave) - Enhanced",
         model_type="pure_wave",  # New model type!
         use_rgd=False, use_qfe=False,
         use_interference_attention=True,  # Always true for pure wave
-        lr=1e-4, dropout=0.1,  # FIXED: Lower learning rate for stability
-        # Pure wave has different parameter structure
+        lr=5e-4, dropout=0.05,  # ENHANCED: Higher LR + lower dropout for more expressivity
+        warmup_steps=2000,  # Longer warmup for complex wave dynamics
+        # Enhanced wave parameters need careful training
     ),
     
     "pure_wave_full": ExperimentConfig(
@@ -551,6 +554,57 @@ def get_dataset(dataset_name: str, console, max_tokens: int = 500_000_000, dry_r
         return load_fineweb_tiktoken(console, subset="sample-10BT", target_tokens=max_tokens)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
+# ==========================================
+# Experiment Utilities
+# ==========================================
+
+def zip_experiment_directory(experiment_dir: str, console: Console):
+    """
+    Zip the entire experiment directory for easy download.
+    
+    Args:
+        experiment_dir: Path to the experiment directory
+        console: Rich console for logging
+    """
+    if not os.path.exists(experiment_dir):
+        console.print(f"[yellow]Warning: Experiment directory {experiment_dir} does not exist[/yellow]")
+        return
+    
+    # Create zip filename
+    zip_filename = f"{experiment_dir}.zip"
+    
+    console.print(f"[cyan]📦 Zipping experiment directory...[/cyan]")
+    console.print(f"[cyan]   Source: {experiment_dir}[/cyan]")
+    console.print(f"[cyan]   Target: {zip_filename}[/cyan]")
+    
+    try:
+        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Walk through all files in the experiment directory
+            for root, dirs, files in os.walk(experiment_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # Create archive name relative to experiment directory
+                    arcname = os.path.relpath(file_path, os.path.dirname(experiment_dir))
+                    zipf.write(file_path, arcname)
+        
+        # Get zip file size for reporting
+        zip_size = os.path.getsize(zip_filename)
+        zip_size_mb = zip_size / (1024 * 1024)
+        
+        console.print(f"[green]✅ Experiment zipped successfully![/green]")
+        console.print(f"[green]   📁 Zip file: {zip_filename}[/green]")
+        console.print(f"[green]   📊 Size: {zip_size_mb:.1f} MB[/green]")
+        
+        # List contents for verification
+        with zipfile.ZipFile(zip_filename, 'r') as zipf:
+            file_count = len(zipf.namelist())
+            console.print(f"[green]   📄 Files: {file_count}[/green]")
+        
+    except Exception as e:
+        console.print(f"[red]❌ Failed to zip experiment directory: {e}[/red]")
+        raise
 
 
 # ==========================================
@@ -1065,6 +1119,13 @@ def train_experiment(
         except Exception as e:
             console.print(f"[yellow]Warning: Failed to save results: {e}[/yellow]")
     
+    # === ZIP EXPERIMENT DIRECTORY ===
+    if experiment_dir and enable_monitoring:
+        try:
+            zip_experiment_directory(experiment_dir, console)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to zip experiment directory: {e}[/yellow]")
+    
     return {
         "name": exp_config.name,
         "config": asdict(exp_config),
@@ -1497,6 +1558,12 @@ def main():
     
     # Print table
     print_results_table(results, console)
+    
+    # Zip the overall results directory
+    try:
+        zip_experiment_directory(output_dir, console)
+    except Exception as e:
+        console.print(f"[yellow]Warning: Failed to zip results directory: {e}[/yellow]")
     
     console.print(f"\n📁 Results saved to: {output_dir}")
     console.print("[bold green]✅ Experiment suite complete![/bold green]")
