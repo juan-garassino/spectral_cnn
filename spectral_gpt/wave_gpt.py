@@ -1319,23 +1319,24 @@ class PureWaveGPT(nn.Module):
 
 class PureWaveExcitation(nn.Module):
     """
-    Token → Wave Excitation.
+    Token → Wave Excitation with DC MODES for Global Attention.
     
-    EVERY TOKEN gets the FULL wave spectrum - ALL frequencies, ALL harmonics!
+    BREAKTHROUGH: Solving "Diagonal Blindness" with Pure Physics!
     
-    Key principle: Token 0 and Token 50256 both have:
-    - Low frequencies (sentence-level patterns)
-    - Mid frequencies (word-level patterns)  
-    - High frequencies (phoneme-level patterns)
-    - All harmonics (1f, 2f, 3f, 4f...)
+    The Problem:
+    - Phase evolution θ = ω*t + φ causes Δθ = ω*(i-j) between positions
+    - For non-zero ω, distant tokens have rapidly rotating phase → destructive interference
+    - Result: Model can only attend locally (diagonal attention)
     
-    The ONLY difference between tokens is their LEARNED wave parameters.
-    Position encoding comes from temporal phase evolution φ(t) = ω*t + φ₀
+    The Solution: DC MODES (Zero-Frequency Waves)
+    - If ω = 0, then Δθ = φ_i - φ_j (position-independent!)
+    - Interference depends ONLY on learned phase content, not distance
+    - Creates "wormholes" for instant long-range attention
     
-    Everything is LEARNABLE:
-    - Frequencies per token per wave
-    - Phases per token per wave
-    - Amplitudes per token per wave per harmonic
+    Wave Spectrum:
+    - DC Modes (ω=0): First N_DC waves - global attention via phase content
+    - Deep Bass (ω~0.001): Ultra-low freq for document-level patterns  
+    - Full Spectrum: Log-spaced from 0.001 to 2.0 Hz
     """
     
     def __init__(self, vocab_size, num_waves, num_harmonics, block_size):
@@ -1345,75 +1346,90 @@ class PureWaveExcitation(nn.Module):
         self.num_harmonics = num_harmonics
         self.block_size = block_size
         
-        # === EVERY TOKEN GETS FULL MULTI-SCALE SPECTRUM ===
-        # Initialize with physics-based prior, but FULLY LEARNABLE
+        # === DC MODES: Zero-Frequency Waves for Global Attention ===
+        # These waves have ω=0, so phase difference is purely content-based
+        self.n_dc_modes = max(4, num_waves // 8)  # ~12.5% of waves are DC
+        n_ac_modes = num_waves - self.n_dc_modes
         
-        # Create the base spectrum covering ALL linguistic scales:
-        # - Sentence scale: 0.005-0.02 Hz (periods 50-200 tokens)
-        # - Phrase scale: 0.02-0.05 Hz (periods 20-50 tokens)
-        # - Word scale: 0.05-0.2 Hz (periods 5-20 tokens)
-        # - Morpheme scale: 0.2-0.5 Hz (periods 2-5 tokens)
-        # - Phoneme scale: 0.5-2.0 Hz (periods 0.5-2 tokens)
+        # === DEEP BASS: Lower frequency floor for longer attention ===
+        # Min freq = 1/block_size ensures we can attend to full context
+        min_freq = 1.0 / block_size  # e.g., 1/256 = 0.004 Hz
+        min_freq = max(0.001, min_freq)  # Floor at 0.001 Hz (1000 token period)
+        max_freq = 2.0  # Keep phoneme resolution
         
-        # Log-spaced frequencies cover all scales naturally
-        base_spectrum = torch.logspace(math.log10(0.005), math.log10(2.0), num_waves)
+        # Create AC spectrum (non-zero frequencies)
+        ac_spectrum = torch.logspace(math.log10(min_freq), math.log10(max_freq), n_ac_modes)
         
-        # EVERY token gets this FULL spectrum as initialization
-        # Shape: (vocab_size, num_waves) - each token has ALL frequencies
+        # DC modes are exactly zero (will be masked from gradients)
+        dc_spectrum = torch.zeros(self.n_dc_modes)
+        
+        # Combine: [DC modes | AC modes]
+        base_spectrum = torch.cat([dc_spectrum, ac_spectrum])
+        
+        # EVERY token gets this spectrum
         init_freqs = base_spectrum.unsqueeze(0).expand(vocab_size, -1).clone()
         
-        # Add small per-token variation for diversity (but all tokens still have all scales!)
-        token_indices = torch.arange(vocab_size, dtype=torch.float32)
-        token_variation = torch.randn(vocab_size, num_waves) * 0.1
-        init_freqs = init_freqs * (1.0 + token_variation)
+        # Add variation ONLY to AC modes (DC must stay at zero)
+        ac_variation = torch.randn(vocab_size, n_ac_modes) * 0.1
+        init_freqs[:, self.n_dc_modes:] = init_freqs[:, self.n_dc_modes:] * (1.0 + ac_variation)
         
-        # Ensure positive frequencies
-        init_freqs = torch.clamp(init_freqs, min=0.001)
+        # Ensure AC frequencies stay positive
+        init_freqs[:, self.n_dc_modes:] = torch.clamp(init_freqs[:, self.n_dc_modes:], min=0.001)
         
-        self.base_freqs = nn.Parameter(init_freqs)  # (vocab_size, num_waves) - FULLY LEARNABLE!
+        self.base_freqs = nn.Parameter(init_freqs)
         
-        print(f"🌊 FULL SPECTRUM for EVERY token:")
-        print(f"   Each token has {num_waves} waves spanning {base_spectrum.min():.4f} - {base_spectrum.max():.3f} Hz")
-        print(f"   Sentence-level: ~{base_spectrum[0]:.4f} Hz (period ~{1/base_spectrum[0]:.0f} tokens)")
-        print(f"   Phoneme-level: ~{base_spectrum[-1]:.3f} Hz (period ~{1/base_spectrum[-1]:.1f} tokens)")
-        print(f"   Total learnable frequencies: {vocab_size} × {num_waves} = {vocab_size * num_waves:,}")
+        # === DC MODE MASK: Prevent gradients from drifting DC waves ===
+        # This mask zeros out gradients for DC mode frequencies
+        dc_mask = torch.ones(num_waves)
+        dc_mask[:self.n_dc_modes] = 0.0  # DC modes: no gradient
+        self.register_buffer('dc_freq_mask', dc_mask)
+        
+        print(f"🌊 WAVE SPECTRUM with DC MODES for Global Attention:")
+        print(f"   🔴 DC Modes (ω=0): {self.n_dc_modes} waves - GLOBAL attention via phase content")
+        print(f"   🟡 Deep Bass: {min_freq:.4f} Hz (period ~{1/min_freq:.0f} tokens)")
+        print(f"   🟢 Full Range: {min_freq:.4f} - {max_freq:.1f} Hz ({n_ac_modes} AC waves)")
+        print(f"   Total: {num_waves} waves per token")
         
         # === HARMONIC MULTIPLIERS ===
-        # Each wave has harmonics: f, 2f, 3f, 4f...
         harmonic_mults = torch.arange(1, num_harmonics + 1, dtype=torch.float32)
         self.register_buffer('harmonic_mults', harmonic_mults)
         
-        # === PHASES - FULLY LEARNABLE per token per wave ===
-        # Random initialization - the model learns what phases work best
+        # === PHASES - CRITICAL for DC modes! ===
+        # For DC modes (ω=0), phase IS the only information carrier
+        # Initialize DC mode phases with more variance for diversity
         init_phases = torch.rand(vocab_size, num_waves) * 2 * math.pi
-        self.phases = nn.Parameter(init_phases)  # (vocab_size, num_waves) - FULLY LEARNABLE!
         
+        # DC modes get EXTRA phase diversity (they carry all the semantic info)
+        dc_phase_boost = torch.randn(vocab_size, self.n_dc_modes) * 0.5
+        init_phases[:, :self.n_dc_modes] = init_phases[:, :self.n_dc_modes] + dc_phase_boost
+        
+        self.phases = nn.Parameter(init_phases)
+        
+        print(f"   DC mode phases: BOOSTED variance for semantic diversity")
         print(f"   Total learnable phases: {vocab_size} × {num_waves} = {vocab_size * num_waves:,}")
         
-        # === AMPLITUDES - FULLY LEARNABLE per token per wave per harmonic ===
-        # Initialize with 1/n decay prior (physics-based) but fully learnable
-        base_amps = 1.0 / harmonic_mults  # [1, 0.5, 0.33, 0.25]
-        
-        # EVERY token gets ALL harmonics for ALL waves
+        # === AMPLITUDES ===
+        base_amps = 1.0 / harmonic_mults
         init_amps = base_amps.view(1, 1, -1).expand(vocab_size, num_waves, -1).clone()
         
-        # Add per-token variation
+        # DC modes get HIGHER initial amplitude (they're important for global attention)
+        init_amps[:, :self.n_dc_modes, :] = init_amps[:, :self.n_dc_modes, :] * 1.5
+        
         amp_variation = torch.randn(vocab_size, num_waves, num_harmonics) * 0.2
         init_amps = init_amps * (1.0 + amp_variation)
         init_amps = torch.clamp(init_amps, min=0.01, max=2.0)
         
-        self.amplitudes = nn.Parameter(init_amps)  # (vocab_size, num_waves, num_harmonics) - FULLY LEARNABLE!
+        self.amplitudes = nn.Parameter(init_amps)
         
+        print(f"   DC mode amplitudes: BOOSTED 1.5x for global attention")
         print(f"   Total learnable amplitudes: {vocab_size} × {num_waves} × {num_harmonics} = {vocab_size * num_waves * num_harmonics:,}")
         
         # === CROSS-WAVE COUPLING ===
-        # Allows waves to influence each other (captures frequency interactions)
         self.wave_coupling = nn.Parameter(
             torch.eye(num_waves) + torch.randn(num_waves, num_waves) * 0.05
         )
         
         # === HARMONIC COUPLING ===
-        # Allows harmonics to influence each other (captures harmonic relationships)
         self.harmonic_coupling = nn.Parameter(
             torch.eye(num_harmonics) + torch.randn(num_harmonics, num_harmonics) * 0.05
         )
@@ -1421,12 +1437,32 @@ class PureWaveExcitation(nn.Module):
         total_params = (vocab_size * num_waves) + (vocab_size * num_waves) + (vocab_size * num_waves * num_harmonics)
         print(f"🎯 Total wave excitation parameters: {total_params:,} (all learnable!)")
         
+        # === GRADIENT HOOK: Zero out DC mode frequency gradients ===
+        # This prevents training from drifting DC modes away from ω=0
+        def _zero_dc_freq_grads(grad):
+            # grad shape: (vocab_size, num_waves)
+            # Zero out gradients for DC mode frequencies (first n_dc_modes)
+            grad_mask = self.dc_freq_mask.view(1, -1)  # (1, num_waves)
+            return grad * grad_mask
+        
+        self.base_freqs.register_hook(_zero_dc_freq_grads)
+        print(f"   ✅ Gradient hook registered: DC mode frequencies locked at ω=0")
+        
     def forward(self, token_ids):
         """
-        Wave excitation: Token → Full Wave Spectrum.
+        Wave excitation: Token → Full Wave Spectrum with DC MODE ENFORCEMENT.
         
         EVERY token gets ALL frequencies, ALL harmonics.
         Position encoding comes from temporal phase evolution.
+        
+        DC MODES (first n_dc_modes waves):
+        - Frequency is EXACTLY ZERO (no position-dependent phase)
+        - Phase difference Δθ = φ_i - φ_j depends ONLY on token content
+        - Creates "wormholes" for instant long-range attention
+        
+        AC MODES (remaining waves):
+        - Standard phase evolution: θ = ω*t + φ₀
+        - Position-dependent attention patterns
         
         Returns: WaveState tuple (freqs, phases, amps)
         """
@@ -1439,13 +1475,22 @@ class PureWaveExcitation(nn.Module):
         token_phases = self.phases[token_ids]          # (B, T, num_waves)
         token_amps = self.amplitudes[token_ids]        # (B, T, num_waves, num_harmonics)
         
-        # === CROSS-WAVE COUPLING ===
+        # === ENFORCE DC MODE FREQUENCIES = 0 BEFORE COUPLING ===
+        # DC modes must stay at exactly zero - mask them out
+        dc_mask = self.dc_freq_mask.view(1, 1, -1)  # (1, 1, num_waves)
+        token_freqs_masked = token_freqs * dc_mask  # DC modes → 0
+        
+        # === CROSS-WAVE COUPLING (AC modes only) ===
         # Waves can influence each other (learned interactions)
-        coupled_freqs = torch.matmul(token_freqs, self.wave_coupling)  # (B, T, num_waves)
+        # But DC modes must remain at zero after coupling
+        coupled_freqs = torch.matmul(token_freqs_masked, self.wave_coupling)  # (B, T, num_waves)
+        
+        # === RE-ENFORCE DC MODE CONSTRAINT AFTER COUPLING ===
+        # Wave coupling can leak non-zero values into DC modes - force them back to zero
+        coupled_freqs = coupled_freqs * dc_mask  # DC modes → 0 again
         
         # === HARMONIC COUPLING ===
         # Harmonics can influence each other (learned harmonic relationships)
-        # Reshape for matmul: (B, T, num_waves, num_harmonics) @ (num_harmonics, num_harmonics)
         coupled_amps = torch.matmul(token_amps, self.harmonic_coupling)  # (B, T, num_waves, num_harmonics)
         
         # === TEMPORAL PHASE EVOLUTION ===
@@ -1454,10 +1499,15 @@ class PureWaveExcitation(nn.Module):
         positions = torch.arange(T, device=device, dtype=torch.float32).view(1, T, 1)
         
         # Phase evolves according to wave equation
+        # DC MODES: ω=0 → θ = 0*t + φ₀ = φ₀ (position-independent!)
+        # AC MODES: θ = ω*t + φ₀ (position-dependent)
         evolved_phases = coupled_freqs * positions + token_phases  # (B, T, num_waves)
         
-        # Ensure frequencies stay positive
-        final_freqs = F.softplus(coupled_freqs) + 1e-6
+        # === FINAL FREQUENCY PROCESSING ===
+        # AC modes: softplus ensures positive frequencies
+        # DC modes: must stay at EXACTLY ZERO
+        ac_freqs = F.softplus(coupled_freqs) + 1e-6  # All positive
+        final_freqs = ac_freqs * dc_mask  # DC modes → 0, AC modes → positive
         
         # Ensure amplitudes stay positive
         final_amps = F.softplus(coupled_amps)
@@ -1713,27 +1763,19 @@ class PhaseInterferometerGate(nn.Module):
 
 class PureWaveInterference(nn.Module):
     """
-    Pure Wave Superposition Interference - Projection via Wave Addition!
+    FULLY MULTI-HEAD Wave Superposition Interference.
     
-    KEY INSIGHT: Instead of matrix projections, we PROJECT waves by
-    ADDING/SUBTRACTING other learnable waves. This is pure wave physics!
+    Each head has its own complete wave physics with FULL SPECTRUM:
+    - Emitter projection waves (per head, all frequencies)
+    - Receiver projection waves (per head, all frequencies)  
+    - Field projection waves (per head, all frequencies)
+    - Output projection waves (per head, all frequencies)
     
-    Projection = Wave Superposition:
-        W_projected = W_input + W_projection  (learnable wave!)
+    KEY PRINCIPLE: Every head starts with ALL frequencies (0.005-2.0 Hz).
+    The model LEARNS which patterns each head should specialize in.
+    No artificial frequency constraints - pure learning from data!
     
-    The projection wave W_projection has its own:
-        - Frequencies (learnable)
-        - Phases (learnable)  
-        - Amplitudes (learnable)
-    
-    This creates INFINITE expressivity because:
-        - Superposition creates beating patterns
-        - Phase differences create interference
-        - Frequency mixing creates harmonics
-        - Everything emerges from wave physics!
-    
-    "Attention" emerges from interference of superposed waves.
-    It's not learned attention weights - it's PHYSICS!
+    The heads are combined via learned softmax weights.
     """
     
     def __init__(self, num_waves, num_harmonics, num_heads, dropout=0.1):
@@ -1741,130 +1783,129 @@ class PureWaveInterference(nn.Module):
         
         self.num_waves = num_waves
         self.num_harmonics = num_harmonics
-        self.num_channels = num_heads  # Multiple interference channels
+        self.num_heads = num_heads
         
-        # === PROJECTION WAVES ===
-        # These are LEARNABLE WAVES that get added to input waves
-        # Each channel has its own projection wave for emitter and receiver
-        
-        # Emitter projection waves (what we add before emitting)
-        # Shape: (num_channels, num_waves) - one wave per channel
+        # === EMITTER PROJECTION WAVES (per head) ===
         self.emit_proj_freqs = nn.Parameter(
-            self._init_projection_freqs(self.num_channels, num_waves)
+            self._init_projection_freqs(num_heads, num_waves)
         )
         self.emit_proj_phases = nn.Parameter(
-            torch.rand(self.num_channels, num_waves) * 2 * math.pi
+            torch.rand(num_heads, num_waves) * 2 * math.pi
         )
         self.emit_proj_amps = nn.Parameter(
-            torch.ones(self.num_channels, num_waves, num_harmonics) * 0.5
+            torch.ones(num_heads, num_waves, num_harmonics) * 0.5
         )
         
-        # Receiver projection waves (what we add before receiving)
+        # === RECEIVER PROJECTION WAVES (per head) ===
         self.recv_proj_freqs = nn.Parameter(
-            self._init_projection_freqs(self.num_channels, num_waves)
+            self._init_projection_freqs(num_heads, num_waves)
         )
         self.recv_proj_phases = nn.Parameter(
-            torch.rand(self.num_channels, num_waves) * 2 * math.pi
+            torch.rand(num_heads, num_waves) * 2 * math.pi
         )
         self.recv_proj_amps = nn.Parameter(
-            torch.ones(self.num_channels, num_waves, num_harmonics) * 0.5
+            torch.ones(num_heads, num_waves, num_harmonics) * 0.5
         )
         
-        # Field content projection wave (what propagates through the field)
+        # === FIELD PROJECTION WAVES (per head) - NOW MULTI-HEAD! ===
         self.field_proj_freqs = nn.Parameter(
-            self._init_projection_freqs(1, num_waves).squeeze(0)
+            self._init_projection_freqs(num_heads, num_waves)
         )
         self.field_proj_phases = nn.Parameter(
-            torch.rand(num_waves) * 2 * math.pi
+            torch.rand(num_heads, num_waves) * 2 * math.pi
         )
         self.field_proj_amps = nn.Parameter(
-            torch.ones(num_waves, num_harmonics) * 0.5
+            torch.ones(num_heads, num_waves, num_harmonics) * 0.5
         )
         
-        # === SUPERPOSITION WEIGHTS ===
-        # How much of the projection wave to add (learnable mixing)
-        self.emit_mix = nn.Parameter(torch.ones(self.num_channels) * 0.5)
-        self.recv_mix = nn.Parameter(torch.ones(self.num_channels) * 0.5)
-        self.field_mix = nn.Parameter(torch.tensor(0.5))
+        # === OUTPUT PROJECTION WAVES (per head) - NOW MULTI-HEAD! ===
+        self.output_proj_freqs = nn.Parameter(
+            torch.zeros(num_heads, num_waves)
+        )
+        self.output_proj_phases = nn.Parameter(
+            torch.zeros(num_heads, num_waves)
+        )
+        self.output_proj_amps = nn.Parameter(
+            torch.zeros(num_heads, num_waves, num_harmonics)
+        )
         
-        # === OUTPUT PROJECTION WAVE ===
-        # Final wave to add when absorbing from field
-        self.output_proj_freqs = nn.Parameter(torch.zeros(num_waves))
-        self.output_proj_phases = nn.Parameter(torch.zeros(num_waves))
-        self.output_proj_amps = nn.Parameter(torch.zeros(num_waves, num_harmonics))
+        # === SUPERPOSITION WEIGHTS (per head) ===
+        self.emit_mix = nn.Parameter(torch.ones(num_heads) * 0.5)
+        self.recv_mix = nn.Parameter(torch.ones(num_heads) * 0.5)
+        self.field_mix = nn.Parameter(torch.ones(num_heads) * 0.5)
+        self.output_mix = nn.Parameter(torch.ones(num_heads) * 0.5)
+        
+        # === HEAD COMBINATION WEIGHTS ===
+        # Learned weights for combining head outputs
+        self.head_weights = nn.Parameter(torch.ones(num_heads) / num_heads)
+        
+        # === PHYSICS PARAMETERS (per head) ===
+        self.interference_strength = nn.Parameter(torch.ones(num_heads))
         
         self.dropout = nn.Dropout(dropout)
         self.eps = 1e-8
         
-        # Physics parameters
-        self.interference_strength = nn.Parameter(torch.ones(1))
+        # Store coupling for visualization
+        self.coupling = None
         
-    def _init_projection_freqs(self, num_channels, num_waves):
+    def _init_projection_freqs(self, num_heads, num_waves):
         """
-        Initialize projection wave frequencies.
+        Initialize projection wave frequencies - ALL HEADS GET FULL SPECTRUM.
         
-        Each channel's projection wave is tuned to different frequency bands.
-        This creates diverse interference patterns across channels.
+        Every head starts with the same full frequency range (0.005 - 2.0 Hz).
+        Small random perturbations break symmetry so heads can specialize.
+        
+        The model learns which frequencies each head should focus on!
         """
-        freqs = torch.zeros(num_channels, num_waves)
+        # Full spectrum for ALL heads
         base_spectrum = torch.logspace(math.log10(0.005), math.log10(2.0), num_waves)
         
-        for c in range(num_channels):
-            # Each channel shifts the base spectrum slightly
-            shift = (c - num_channels / 2) * 0.1
-            freqs[c] = base_spectrum * (1.0 + shift)
-            
-            # Add some randomness
-            freqs[c] = freqs[c] * (1.0 + torch.randn(num_waves) * 0.1)
+        # Every head gets the full spectrum
+        freqs = base_spectrum.unsqueeze(0).expand(num_heads, -1).clone()
+        
+        # Small random perturbation to break symmetry (heads will diverge during training)
+        freqs = freqs * (1.0 + torch.randn(num_heads, num_waves) * 0.05)
         
         return freqs
         
     def forward(self, wave_state: WaveState) -> WaveState:
         """
-        Wave interference via WAVE SUPERPOSITION projections!
+        FULLY MULTI-HEAD Wave Interference.
         
-        Pipeline:
-        1. EMIT: Add projection wave to input → emitter wave
-        2. RECEIVE: Add projection wave to input → receiver wave  
-        3. INTERFERE: Emitter and receiver waves interfere
-        4. SUPERPOSE: Weighted sum based on interference strength
-        5. OUTPUT: Add output projection wave
+        Each head has independent:
+        1. EMIT: Emitter projection waves
+        2. RECEIVE: Receiver projection waves  
+        3. FIELD: Field content waves
+        4. OUTPUT: Output projection waves
         
-        NO MATRICES! Just wave addition and interference physics!
+        Heads are combined via learned weights.
         """
         B, T, W = wave_state.freqs.shape
-        C = self.num_channels
+        H = self.num_heads
         NH = self.num_harmonics
         device = wave_state.freqs.device
         
-        # === STEP 1: CREATE EMITTER WAVES via Superposition ===
-        # emitter = input_wave + emit_proj_wave (per channel)
-        # Shape: (B, C, T, W)
+        # === STEP 1: CREATE EMITTER WAVES (per head) ===
+        # Shape: (B, H, T, W)
+        emit_freqs = wave_state.freqs.unsqueeze(1) + self.emit_mix.view(1, H, 1, 1) * self.emit_proj_freqs.unsqueeze(0).unsqueeze(2)
+        emit_phases = wave_state.phases.unsqueeze(1) + self.emit_mix.view(1, H, 1, 1) * self.emit_proj_phases.unsqueeze(0).unsqueeze(2)
+        emit_amps = wave_state.amps.unsqueeze(1) + self.emit_mix.view(1, H, 1, 1, 1) * self.emit_proj_amps.unsqueeze(0).unsqueeze(2)
         
-        emit_freqs = wave_state.freqs.unsqueeze(1) + self.emit_mix.view(1, C, 1, 1) * self.emit_proj_freqs.unsqueeze(0).unsqueeze(2)
-        emit_phases = wave_state.phases.unsqueeze(1) + self.emit_mix.view(1, C, 1, 1) * self.emit_proj_phases.unsqueeze(0).unsqueeze(2)
-        emit_amps = wave_state.amps.unsqueeze(1) + self.emit_mix.view(1, C, 1, 1, 1) * self.emit_proj_amps.unsqueeze(0).unsqueeze(2)
-        
-        # Ensure positive values
         emit_freqs = F.softplus(emit_freqs) + self.eps
         emit_amps = F.softplus(emit_amps)
         
-        # === STEP 2: CREATE RECEIVER WAVES via Superposition ===
-        # receiver = input_wave + recv_proj_wave (per channel)
-        
-        recv_freqs = wave_state.freqs.unsqueeze(1) + self.recv_mix.view(1, C, 1, 1) * self.recv_proj_freqs.unsqueeze(0).unsqueeze(2)
-        recv_phases = wave_state.phases.unsqueeze(1) + self.recv_mix.view(1, C, 1, 1) * self.recv_proj_phases.unsqueeze(0).unsqueeze(2)
-        recv_amps = wave_state.amps.unsqueeze(1) + self.recv_mix.view(1, C, 1, 1, 1) * self.recv_proj_amps.unsqueeze(0).unsqueeze(2)
+        # === STEP 2: CREATE RECEIVER WAVES (per head) ===
+        recv_freqs = wave_state.freqs.unsqueeze(1) + self.recv_mix.view(1, H, 1, 1) * self.recv_proj_freqs.unsqueeze(0).unsqueeze(2)
+        recv_phases = wave_state.phases.unsqueeze(1) + self.recv_mix.view(1, H, 1, 1) * self.recv_proj_phases.unsqueeze(0).unsqueeze(2)
+        recv_amps = wave_state.amps.unsqueeze(1) + self.recv_mix.view(1, H, 1, 1, 1) * self.recv_proj_amps.unsqueeze(0).unsqueeze(2)
         
         recv_freqs = F.softplus(recv_freqs) + self.eps
         recv_amps = F.softplus(recv_amps)
         
-        # === STEP 3: CREATE FIELD CONTENT via Superposition ===
-        # field = input_wave + field_proj_wave
-        
-        field_freqs = wave_state.freqs + self.field_mix * self.field_proj_freqs
-        field_phases = wave_state.phases + self.field_mix * self.field_proj_phases
-        field_amps = wave_state.amps + self.field_mix * self.field_proj_amps
+        # === STEP 3: CREATE FIELD WAVES (per head) - NOW MULTI-HEAD! ===
+        field_freqs = wave_state.freqs.unsqueeze(1) + self.field_mix.view(1, H, 1, 1) * self.field_proj_freqs.unsqueeze(0).unsqueeze(2)
+        field_phases = wave_state.phases.unsqueeze(1) + self.field_mix.view(1, H, 1, 1) * self.field_proj_phases.unsqueeze(0).unsqueeze(2)
+        field_amps = wave_state.amps.unsqueeze(1) + self.field_mix.view(1, H, 1, 1, 1) * self.field_proj_amps.unsqueeze(0).unsqueeze(2)
         
         field_freqs = F.softplus(field_freqs) + self.eps
         field_amps = F.softplus(field_amps)
@@ -1872,70 +1913,71 @@ class PureWaveInterference(nn.Module):
         # === STEP 4: TEMPORAL PHASE EVOLUTION ===
         positions = torch.arange(T, device=device, dtype=torch.float32)
         
-        # Emitter phase at each position: θ = ω*t + φ
-        emit_theta = emit_freqs * positions.view(1, 1, T, 1) + emit_phases  # (B, C, T, W)
+        # Phase at each position: θ = ω*t + φ
+        emit_theta = emit_freqs * positions.view(1, 1, T, 1) + emit_phases  # (B, H, T, W)
+        recv_theta = recv_freqs * positions.view(1, 1, T, 1) + recv_phases  # (B, H, T, W)
         
-        # Receiver phase at each position
-        recv_theta = recv_freqs * positions.view(1, 1, T, 1) + recv_phases  # (B, C, T, W)
-        
-        # === STEP 5: WAVE INTERFERENCE ===
-        # Create phasors: A * e^(iθ)
-        emit_amp_total = emit_amps.sum(dim=-1)  # Sum harmonics: (B, C, T, W)
+        # === STEP 5: WAVE INTERFERENCE (per head) ===
+        emit_amp_total = emit_amps.sum(dim=-1)  # (B, H, T, W)
         recv_amp_total = recv_amps.sum(dim=-1)
         
         emit_phasor = emit_amp_total * torch.exp(1j * emit_theta.to(torch.complex64))
         recv_phasor = recv_amp_total * torch.exp(1j * recv_theta.to(torch.complex64))
         
-        # Interference: Re(emit · recv*) for each pair of positions
-        # This is the PHYSICS: I = A₁*A₂*cos(θ₁ - θ₂)
+        # Interference per head: (B, H, T, T)
         interference = torch.matmul(
-            emit_phasor,  # (B, C, T, W)
-            recv_phasor.conj().transpose(-2, -1)  # (B, C, W, T)
-        ).real  # (B, C, T, T)
+            emit_phasor,
+            recv_phasor.conj().transpose(-2, -1)
+        ).real / (W ** 0.5)
         
-        # Scale by number of waves
-        interference = interference / (W ** 0.5)
+        # === STEP 6: FULL INTENSITY with per-head strength ===
+        emit_energy = (emit_amp_total ** 2).sum(dim=-1, keepdim=True)  # (B, H, T, 1)
+        recv_energy = (recv_amp_total ** 2).sum(dim=-1, keepdim=True).transpose(-2, -1)  # (B, H, 1, T)
         
-        # === STEP 6: FULL INTENSITY FORMULA ===
-        # I = A_emit² + A_recv² + 2*A_emit*A_recv*cos(Δφ)
-        emit_energy = (emit_amp_total ** 2).sum(dim=-1, keepdim=True)  # (B, C, T, 1)
-        recv_energy = (recv_amp_total ** 2).sum(dim=-1, keepdim=True).transpose(-2, -1)  # (B, C, 1, T)
-        
-        intensity = emit_energy + recv_energy + 2 * interference * self.interference_strength
+        # Per-head interference strength
+        intensity = emit_energy + recv_energy + 2 * interference * self.interference_strength.view(1, H, 1, 1)
         
         # === STEP 7: PHYSICS-BASED NORMALIZATION ===
         emit_total = emit_amp_total.sum(dim=-1, keepdim=True)
         recv_total = recv_amp_total.sum(dim=-1, keepdim=True).transpose(-2, -1)
         max_intensity = (emit_total + recv_total) ** 2 + self.eps
         
-        coupling = intensity / max_intensity  # Transmission coefficient [0, 1]
+        coupling = intensity / max_intensity  # (B, H, T, T)
         
         # === STEP 8: CAUSAL MASK (Light Cone) ===
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
         coupling = coupling.masked_fill(causal_mask, 0.0)
         
-        # Normalize coupling weights
+        # Normalize coupling weights per head
         coupling = coupling / (coupling.sum(dim=-1, keepdim=True) + self.eps)
         coupling = self.dropout(coupling)
         
-        # === STEP 9: WAVE SUPERPOSITION (Weighted Sum) ===
-        # Apply coupling to field content
-        out_freqs = torch.matmul(coupling, field_freqs.unsqueeze(1).expand(-1, C, -1, -1))
-        out_phases = torch.matmul(coupling, field_phases.unsqueeze(1).expand(-1, C, -1, -1))
+        # Store for visualization
+        self.coupling = coupling.detach()
         
-        field_amps_flat = field_amps.view(B, T, -1).unsqueeze(1).expand(-1, C, -1, -1)
-        out_amps_flat = torch.matmul(coupling, field_amps_flat)
+        # === STEP 9: WAVE SUPERPOSITION (per head) ===
+        # Apply coupling to field content (field is now per-head!)
+        # field_freqs: (B, H, T, W), coupling: (B, H, T, T)
+        out_freqs = torch.matmul(coupling, field_freqs)  # (B, H, T, W)
+        out_phases = torch.matmul(coupling, field_phases)  # (B, H, T, W)
         
-        # Average across channels
-        out_freqs = out_freqs.mean(dim=1)  # (B, T, W)
-        out_phases = out_phases.mean(dim=1)
-        out_amps_flat = out_amps_flat.mean(dim=1)
-        out_amps = out_amps_flat.view(B, T, W, NH)
+        # Handle amplitudes: (B, H, T, W, NH) -> flatten -> matmul -> reshape
+        field_amps_flat = field_amps.view(B, H, T, -1)  # (B, H, T, W*NH)
+        out_amps_flat = torch.matmul(coupling, field_amps_flat)  # (B, H, T, W*NH)
+        out_amps = out_amps_flat.view(B, H, T, W, NH)  # (B, H, T, W, NH)
         
-        # === STEP 10: OUTPUT PROJECTION via Wave Addition ===
-        final_freqs = out_freqs + self.output_proj_freqs
-        final_phases = out_phases + self.output_proj_phases
-        final_amps = out_amps + self.output_proj_amps
+        # === STEP 10: ADD OUTPUT PROJECTION (per head) ===
+        out_freqs = out_freqs + self.output_mix.view(1, H, 1, 1) * self.output_proj_freqs.unsqueeze(0).unsqueeze(2)
+        out_phases = out_phases + self.output_mix.view(1, H, 1, 1) * self.output_proj_phases.unsqueeze(0).unsqueeze(2)
+        out_amps = out_amps + self.output_mix.view(1, H, 1, 1, 1) * self.output_proj_amps.unsqueeze(0).unsqueeze(2)
+        
+        # === STEP 11: COMBINE HEADS via learned weights ===
+        # Normalize head weights
+        head_w = F.softmax(self.head_weights, dim=0).view(1, H, 1, 1)
+        
+        final_freqs = (out_freqs * head_w).sum(dim=1)  # (B, T, W)
+        final_phases = (out_phases * head_w).sum(dim=1)  # (B, T, W)
+        final_amps = (out_amps * head_w.unsqueeze(-1)).sum(dim=1)  # (B, T, W, NH)
         
         return WaveState(final_freqs, final_phases, final_amps)
 
@@ -2366,15 +2408,17 @@ class WaveRMSNorm(nn.Module):
 
 class WaveCollapse(nn.Module):
     """
-    Enhanced Wave → Logits (Measurement/Collapse) with Attention.
+    SIMPLIFIED Wave → Logits (Measurement/Collapse) - Parameter Efficient.
     
-    The final "measurement" that collapses the wave function
-    into a probability distribution over vocabulary.
+    CRITICAL FIX: The previous implementation was parameter-heavy (91.6% of model!).
+    This simplified version shifts parameters to the reasoning core.
     
-    Enhanced with:
-    - Multi-head attention over wave parameters
-    - Frequency-specific processing
-    - Harmonic content analysis
+    Simple approach:
+    1. Normalize wave parameters to reasonable ranges
+    2. Concatenate all wave info into single vector
+    3. Single linear projection to vocabulary (minimal parameters)
+    
+    This forces the model to do reasoning in the wave layers, not the head.
     """
     
     def __init__(self, vocab_size, num_waves, num_harmonics):
@@ -2383,59 +2427,20 @@ class WaveCollapse(nn.Module):
         self.num_waves = num_waves
         self.num_harmonics = num_harmonics
         
-        # === WAVE PARAMETER PROCESSING ===
-        # Separate processing for different wave parameter types
-        self.freq_processor = nn.Sequential(
-            nn.Linear(num_waves, num_waves * 2),
-            nn.GELU(),
-            nn.Linear(num_waves * 2, num_waves),
-            nn.Dropout(0.1)
-        )
+        # === MINIMAL PROCESSING ===
+        # Just normalize and concatenate - no heavy processing
+        wave_dim = num_waves + num_waves + num_waves * num_harmonics  # freqs + phases + amps
+        self.wave_norm = nn.LayerNorm(wave_dim)
         
-        self.phase_processor = nn.Sequential(
-            nn.Linear(num_waves, num_waves * 2),
-            nn.GELU(),
-            nn.Linear(num_waves * 2, num_waves),
-            nn.Dropout(0.1)
-        )
+        # === SINGLE PROJECTION (Minimal Parameters) ===
+        # Direct projection with small bottleneck to minimize head parameters
+        bottleneck_dim = min(256, wave_dim // 2)  # Very small bottleneck
         
-        amp_dim = num_waves * num_harmonics
-        self.amp_processor = nn.Sequential(
-            nn.Linear(amp_dim, amp_dim * 2),
-            nn.GELU(),
-            nn.Linear(amp_dim * 2, amp_dim),
-            nn.Dropout(0.1)
-        )
-        
-        # === WAVE ATTENTION ===
-        # Self-attention over wave parameters to capture cross-wave interactions
-        wave_dim = num_waves * 3  # freqs + phases + processed_amps
-        self.wave_attention = nn.MultiheadAttention(
-            embed_dim=wave_dim,
-            num_heads=8,
-            dropout=0.1,
-            batch_first=True
-        )
-        
-        # === HARMONIC ANALYSIS ===
-        # Analyze harmonic content for richer representation
-        self.harmonic_analyzer = nn.Sequential(
-            nn.Linear(num_harmonics, num_harmonics * 2),
-            nn.GELU(),
-            nn.Linear(num_harmonics * 2, num_harmonics),
-            nn.Dropout(0.1)
-        )
-        
-        # === FINAL PROJECTION ===
-        final_dim = wave_dim + num_waves * num_harmonics  # wave_features + harmonic_features
-        self.wave_norm = nn.LayerNorm(final_dim)
-        
-        # Multi-layer projection for more expressivity
         self.collapse_proj = nn.Sequential(
-            nn.Linear(final_dim, final_dim * 2),
+            nn.Linear(wave_dim, bottleneck_dim),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(final_dim * 2, vocab_size)
+            nn.Linear(bottleneck_dim, vocab_size)
         )
         
         # Initialize with smaller weights for stability
@@ -2443,78 +2448,38 @@ class WaveCollapse(nn.Module):
         
     def _init_weights(self):
         """Initialize weights with proper scaling for gradient flow."""
-        for module in [self.freq_processor, self.phase_processor, self.amp_processor, 
-                      self.harmonic_analyzer]:
-            for layer in module:
-                if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight)
-                    if layer.bias is not None:
-                        layer.bias.data.zero_()
-        
-        # Final projection needs careful initialization
         for layer in self.collapse_proj:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)
-                # Scale down the final layer for stable logits
-                if layer.out_features > 1000:  # This is the vocab projection
-                    layer.weight.data *= 0.1
+                # Scale down for stable logits
+                layer.weight.data *= 0.1
                 if layer.bias is not None:
                     layer.bias.data.zero_()
         
     def forward(self, wave_state: WaveState) -> torch.Tensor:
         B, T, W = wave_state.freqs.shape
-        H = wave_state.amps.shape[-1]
         
-        # === PROCESS WAVE PARAMETERS ===
-        # Normalize and process frequencies
-        freq_norm = torch.tanh(wave_state.freqs * 0.2)  # Increased sensitivity
-        processed_freqs = self.freq_processor(freq_norm)
+        # === SIMPLE NORMALIZATION ===
+        # Normalize wave parameters to reasonable ranges
+        freq_norm = torch.tanh(wave_state.freqs * 0.1)  # Normalize frequencies
+        phase_norm = torch.sin(wave_state.phases)        # Normalize phases to [-1, 1]
+        amp_norm = torch.clamp(wave_state.amps, min=0.0, max=2.0)  # Clamp amplitudes
         
-        # Process phases with circular normalization
-        phase_norm = torch.stack([torch.sin(wave_state.phases), torch.cos(wave_state.phases)], dim=-1)
-        phase_norm = phase_norm.mean(dim=-1)  # Combine sin/cos
-        processed_phases = self.phase_processor(phase_norm)
+        # Flatten amplitudes
+        amp_flat = amp_norm.view(B, T, -1)  # (B, T, W*H)
         
-        # Process amplitudes
-        amps_flat = wave_state.amps.view(B, T, -1)
-        amp_norm = torch.clamp(amps_flat, min=0.0, max=3.0)  # Increased range
-        processed_amps_flat = self.amp_processor(amp_norm)
-        processed_amps = processed_amps_flat.view(B, T, W, H)
+        # === CONCATENATE ALL WAVE PARAMETERS ===
+        # Simple concatenation - let the reasoning layers do the work!
+        wave_vector = torch.cat([
+            freq_norm,    # (B, T, W)
+            phase_norm,   # (B, T, W)  
+            amp_flat      # (B, T, W*H)
+        ], dim=-1)  # (B, T, W + W + W*H)
         
-        # === HARMONIC ANALYSIS ===
-        # Analyze harmonic content for each wave
-        harmonic_features = []
-        for wave_idx in range(W):
-            wave_harmonics = processed_amps[:, :, wave_idx, :]  # (B, T, H)
-            analyzed_harmonics = self.harmonic_analyzer(wave_harmonics)
-            harmonic_features.append(analyzed_harmonics)
-        
-        harmonic_features = torch.stack(harmonic_features, dim=2)  # (B, T, W, H)
-        harmonic_features_flat = harmonic_features.view(B, T, -1)
-        
-        # === WAVE ATTENTION ===
-        # Combine processed wave parameters
-        # Summarize amplitudes: sum across harmonics to get per-wave amplitude
-        amps_per_wave = processed_amps.sum(dim=-1)  # (B, T, W) - sum harmonics
-        
-        wave_features = torch.cat([
-            processed_freqs,
-            processed_phases,
-            amps_per_wave  # Summarized amps per wave
-        ], dim=-1)  # (B, T, wave_dim = 3*W)
-        
-        # Self-attention over wave parameters
-        attended_waves, _ = self.wave_attention(wave_features, wave_features, wave_features)
-        
-        # === COMBINE ALL FEATURES ===
-        final_features = torch.cat([
-            attended_waves,
-            harmonic_features_flat
-        ], dim=-1)  # (B, T, final_dim)
-        
-        # Normalize and project to vocabulary
-        final_features = self.wave_norm(final_features)
-        logits = self.collapse_proj(final_features)  # (B, T, vocab_size)
+        # === MINIMAL PROJECTION ===
+        # Normalize and project to vocabulary with minimal parameters
+        wave_vector = self.wave_norm(wave_vector)
+        logits = self.collapse_proj(wave_vector)  # (B, T, vocab_size)
         
         return logits
 

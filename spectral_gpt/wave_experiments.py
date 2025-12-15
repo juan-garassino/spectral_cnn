@@ -1298,8 +1298,6 @@ def train_experiment(
             # Check every 250 steps for scientific rigor
             if (step + 1) % 250 == 0:
                 avg = sum(losses[-250:]) / len(losses[-250:])
-                # Use actual annealing ratio instead of legacy wave_ratio
-                wave_r = current_annealing_ratio
                 
                 # Fast validation check
                 model.eval()
@@ -1317,8 +1315,39 @@ def train_experiment(
                 current_val_loss = sum(val_losses_accum) / len(val_losses_accum)
                 perplexities.append(math.exp(current_val_loss))
                 
-                # Log CE loss explicitly
-                console.print(f"Step {step+1:5d} | Train(CE): {avg_loss:.4f} | Val: {current_val_loss:.4f} | AvgTrain: {avg:.4f} | R: {wave_r:.3f}")
+                # === EXTRACT TRINITY METRICS FOR PURE WAVE GPT ===
+                trinity_info = ""
+                if exp_config.model_type == "pure_wave":
+                    try:
+                        base_model = model.module if hasattr(model, 'module') else model
+                        if hasattr(base_model, 'wave_layers') and len(base_model.wave_layers) > 0:
+                            layer0 = base_model.wave_layers[0]
+                            
+                            # Saturation gains (Overdrive) - higher = sharper logic
+                            if hasattr(layer0, 'wave_mlp') and hasattr(layer0.wave_mlp, 'freq_gain'):
+                                avg_gain = layer0.wave_mlp.freq_gain.mean().item()
+                                trinity_info += f" | Gain: {avg_gain:.2f}"
+                            
+                            # FM modulation index - how much context shifts frequencies
+                            if hasattr(layer0, 'wave_fm') and hasattr(layer0.wave_fm, 'mod_index'):
+                                avg_mod = layer0.wave_fm.mod_index.mean().item()
+                                trinity_info += f" | FM: {avg_mod:.2f}"
+                            
+                            # Interferometer gate sharpness - how binary the gating is
+                            if hasattr(layer0, 'attn_gate') and hasattr(layer0.attn_gate, 'gate_sharpness'):
+                                gate_sharp = layer0.attn_gate.gate_sharpness.item()
+                                trinity_info += f" | Gate: {gate_sharp:.2f}"
+                    except Exception as e:
+                        pass  # Don't fail training if metrics extraction fails
+                
+                # Build log message based on model type
+                if exp_config.model_type == "pure_wave":
+                    # PureWaveGPT - no annealing, show Trinity metrics
+                    console.print(f"Step {step+1:5d} | Train: {avg_loss:.4f} | Val: {current_val_loss:.4f} | Avg: {avg:.4f}{trinity_info}")
+                else:
+                    # Standard/Wave GPT - show annealing ratio
+                    wave_r = wave_ratios[-1] if wave_ratios else current_annealing_ratio
+                    console.print(f"Step {step+1:5d} | Train: {avg_loss:.4f} | Val: {current_val_loss:.4f} | Avg: {avg:.4f} | R: {wave_r:.3f}")
                 
                 # Generate visualizations if monitoring enabled
                 if viz_manager and viz_manager.should_visualize(step + 1):

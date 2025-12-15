@@ -4,214 +4,235 @@
 
 | Component | Options | Description |
 |-----------|---------|-------------|
-| **Embeddings** | Standard / Wave | Standard = lookup table, Wave = physics-based (ω₀ = 1/√Mass) |
-| **Attention** | Standard / Hybrid / Interference | Standard = vanilla GPT-2 (Q·K softmax), Hybrid = wave interference + softmax, Interference = phasor-based energy normalization (I = A²+A²+2AA·cos(Δφ), O(T²) memory) |
-| **Optimizer** | AdamW / WaveOpt | AdamW = standard, WaveOpt = parameter-specific masses + resonance damping |
-| **Loss** | CE / QFE | CE = CrossEntropy, QFE = + phase/energy/harmonic regularization |
+| **Embeddings** | Standard / Wave / **Pure Wave** | Standard = lookup, Wave = physics-based, **Pure Wave = DC+AC modes** |
+| **Attention** | Standard / Hybrid / Interference / **Multi-Head Wave** | Standard = GPT-2, **Multi-Head Wave = per-head full spectrum** |
+| **Optimizer** | AdamW / WaveOpt | AdamW = standard, WaveOpt = parameter-specific masses |
+| **Loss** | CE / QFE | CE = CrossEntropy, QFE = + phase/energy regularization |
+| **Trinity** | Off / On | **NEW**: Saturation + FM + Interferometer gates |
+| **DC Modes** | Off / On | **NEW**: Zero-frequency waves for global attention |
 
 ---
 
-## How the Grid Works
+## 🔴 NEW: Diagonal Blindness Experiments
 
-Each experiment is **one point** in the grid. Running all experiments together forms a complete ablation study.
+### The Problem
+Standard phase evolution `θ = ω*t + φ` causes **diagonal attention patterns**:
+- Phase difference `Δθ = ω*(i-j)` grows with distance
+- Distant tokens → rapid phase rotation → destructive interference
+- Result: Model can ONLY attend locally
 
+### The Solution: DC Modes + Trinity
+
+| Experiment | DC Modes | Trinity | Description |
+|------------|----------|---------|-------------|
+| `diagonal_baseline` | ❌ | ❌ | Baseline (shows diagonal blindness) |
+| `diagonal_dc` | ✅ | ❌ | DC modes only |
+| `diagonal_trinity` | ❌ | ✅ | Trinity only |
+| `diagonal_full` | ✅ | ✅ | **DC + Trinity** (recommended) |
+
+### DC Modes Physics
 ```
-## 🔬 EXPERIMENT GRID
-
-### Embeddings × Attention Matrix
-
-|  | **Standard Attention**<br/>(GPT-2 Q·K + softmax) | **Hybrid Attention**<br/>(wave + softmax) | **Interference Attention**<br/>(energy normalization) |
-|--|--|--|--|
-| **Standard Embeddings**<br/>(lookup) | 🔴 `standard_transformer`<br/>*Control baseline* | ❌ N/A | ❌ N/A |
-| **Wave Embeddings**<br/>(physics) | ❌ N/A | 🔵 `wave_baseline`<br/>*Wave embeddings test* | 🟢 `interference_attention`<br/>*Physics attention test* |
-
-### Optimizer × Loss Matrix
-
-|  | **AdamW** | **WaveOpt** |
-|--|--|--|
-| **CE Loss** | 🔵 `wave_baseline` | 🔵 `rgd_only` |
-| **QFE Loss** | 🔵 `qfe_only` | 🟢 `full_physics` |
-
-### 🌊 Pure Wave Architecture
-
-| Experiment | Description |
-|--|--|
-| 🟣 `pure_wave` | **Pure Wave-to-Wave** (NO embeddings!) |
-| 🟣 `pure_wave_full` | **Pure Wave + WaveOpt + QFE** (100% wave physics) |
-
-### Experiment Progression
-
-```
-🔴 standard_transformer → 🔵 wave_baseline → 🟢 interference_attention → 🟣 pure_wave
-        ↓                        ↓                        ↓                    ↓
-   (Control)              (Wave Embed)           (Wave Physics)         (Pure Wave)
+Standard: θ = ω*t + φ → Δθ = ω*(i-j) → position-dependent
+DC Mode:  θ = 0*t + φ → Δθ = φ_i - φ_j → content-dependent only!
 ```
 
-**Legend:**
-- 🔴 **Control**: Standard transformer baseline
-- 🔵 **Wave**: Hybrid wave components  
-- 🟢 **Physics**: Physics-based optimization/attention
-- 🟣 **Pure**: Revolutionary pure wave architecture
-- ❌ **N/A**: Not implemented (unnecessary combinations)
-```
-
-**To run the full grid:** Run each experiment individually. Together they form the complete ablation study.
+### Expected Results
+- `diagonal_baseline`: Perfect diagonal attention, loss ~6.5 (unigram)
+- `diagonal_dc`: Off-diagonal attention via DC modes
+- `diagonal_trinity`: Sharper logic, better mixing
+- `diagonal_full`: Global attention + sharp logic
 
 ---
 
-## Experiment Matrix
+## 🌊 Pure Wave Architecture (Updated)
 
-| Experiment | Embed | Attention | Optimizer | Loss | What It Tests |
-|------------|-------|-----------|-----------|------|---------------|
-| `standard_transformer` | Std | **Standard (GPT-2)** | AdamW | CE | **CONTROL** - Pure GPT-2 baseline |
-| `wave_baseline` | Wave | Hybrid | AdamW | CE | Do wave embeddings help? |
-| `interference_attention` | Wave | **Interference** | AdamW | CE | Does physics attention help? |
-| `rgd_only` | Wave | Hybrid | WaveOpt | CE | Does physics optimizer help? |
-| `qfe_only` | Wave | Hybrid | AdamW | QFE | Does coherence loss help? |
-| `full_physics` | Wave | Hybrid | WaveOpt | QFE | Full wave stack (hybrid attention) |
-| `interference_full` | Wave | **Interference** | WaveOpt | QFE | **FULL PHYSICS** - Everything wave |
-| `pure_wave` | **Pure Wave** | **Pure Wave** | AdamW | CE | **🌊 PURE WAVE GPT** - Wave-to-wave throughout |
-| `pure_wave_full` | **Pure Wave** | **Pure Wave** | WaveOpt | QFE | **🌊 PURE WAVE + FULL PHYSICS** |
+### Architecture Evolution
 
----
-
-## 🌊 Pure Wave Architecture
-
-The `pure_wave` experiments test a completely new architecture:
-
-### **Traditional Transformer:**
 ```
-Token → Embedding → Attention → Embedding → MLP → Embedding → Logits
+v1: Token → Wave → WaveAttn → Wave → WaveMLP → Wave → Logits
+                    ↓
+v2: Token → Wave(DC+AC) → MultiHead-Interference → [Gate] → Wave → [Saturation]MLP → [Gate] → Wave → Logits
 ```
 
-### **Hybrid Wave (interference_attention):**
-```
-Token → Wave → Embedding → InterferenceAttn → Embedding → Wave → Logits
-```
+### Key Components
 
-### **🌊 Pure Wave GPT:**
-```
-Token → Wave → WaveAttn → Wave → WaveMLP → Wave → Logits
-```
+| Component | v1 | v2 (Current) |
+|-----------|----|----|
+| Wave Excitation | AC only | **DC + AC modes** |
+| Attention | Single-head | **Multi-head (full spectrum per head)** |
+| MLP | Linear | **4x expansion + Saturation** |
+| Residuals | Standard | **Phase Interferometer Gates** |
+| Context | None | **FM Modulation** |
 
-**Key Differences:**
-- **No embedding space anywhere** - pure wave-to-wave computation
-- **Emergent attention patterns** from learned wave interference
-- **Learnable decay/re-emergence** from frequency beating
-- **All patterns emerge from physics** - no hardcoded structures
-
-### **Wave State Representation:**
+### Wave State Representation
 ```python
 WaveState = {
-    freqs: (B, T, num_waves),           # Learned frequencies per token
-    phases: (B, T, num_waves),          # Learned phases per token  
-    amps: (B, T, num_waves, harmonics) # Learned harmonic amplitudes
+    freqs: (B, T, num_waves),           # DC modes = 0, AC modes > 0
+    phases: (B, T, num_waves),          # DC: semantic content, AC: position
+    amps: (B, T, num_waves, harmonics)  # Harmonic amplitudes
 }
 ```
 
-### **How Attention Emerges:**
-1. **Each token learns frequencies** via `freq_proj(wave_state)`
-2. **Phase evolution:** `θ(t) = ω*t + φ₀` (position = time)
-3. **Wave interference:** `I = A_Q² + A_K² + 2*A_Q*A_K*cos(Δφ)`
-4. **Beating patterns:** When `f₁ ≠ f₂`, attention oscillates with period `1/|f₁-f₂|`
-5. **Decay/re-emergence:** Network learns frequency differences for linguistic patterns
+---
+
+## 🎯 The Non-Linear Physics Trinity
+
+### 1. WaveSaturation (Overdrive)
+```python
+saturated = tanh(gain * (x + bias))
+# gain > 1 → square-wave logic states
+```
+**Purpose**: Creates sharp 0/1 decisions from smooth waves
+
+### 2. WaveFM (Frequency Modulation)
+```python
+ω_new = ω_old + mod_index * context_signal
+# Past tokens shift future token frequencies
+```
+**Purpose**: Context physically alters meaning
+
+### 3. PhaseInterferometer (Gated Residuals)
+```python
+gate = sigmoid(sharpness * cos(φ_input - φ_control))
+out = input + gate * delta
+# φ_control ≈ 0 → PASS, φ_control ≈ π → BLOCK
+```
+**Purpose**: Logic NOT via destructive interference
 
 ---
 
-## Key Comparisons
+## 🚀 Multi-Head Wave Interference
 
-### 1. Wave Embeddings Effect
-```
-standard_transformer  vs  wave_baseline
-       (Std)                 (Wave)
-```
-**Question:** Do physics-based embeddings improve language modeling?
+### Key Principle: All Heads Learn All Frequencies
 
-### 2. Interference Attention Effect  
-```
-wave_baseline  vs  interference_attention
-   (Hybrid)          (Interference)
-```
-**Question:** Does the physics attention formula beat softmax?
+```python
+# Every head starts with FULL spectrum (0.005 - 2.0 Hz)
+# No artificial frequency constraints!
+# Heads specialize through learning
 
-### 3. Physics Optimizer Effect
+def _init_projection_freqs(num_heads, num_waves):
+    base_spectrum = logspace(0.005, 2.0, num_waves)
+    freqs = base_spectrum.expand(num_heads, -1)
+    freqs *= (1 + randn(num_heads, num_waves) * 0.05)  # Break symmetry
+    return freqs
 ```
-wave_baseline  vs  rgd_only
-   (AdamW)         (WaveOpt)
-```
-**Question:** Does parameter-specific mass help optimization?
 
-### 4. Coherence Loss Effect
-```
-wave_baseline  vs  qfe_only
-    (CE)            (QFE)
-```
-**Question:** Does phase/energy regularization improve coherence?
-
-### 5. Full Stack vs Baseline
-```
-standard_transformer  vs  interference_full
-      (Nothing)            (Everything)
-```
-**Question:** Is the complete wave-native approach better?
-
-### 6. 🌊 Pure Wave vs Hybrid Wave
-```
-interference_attention  vs  pure_wave
-    (Hybrid Wave)         (Pure Wave)
-```
-**Question:** Does pure wave-to-wave beat hybrid wave-embedding-wave?
-
-### 7. 🌊 Pure Wave vs Standard
-```
-standard_transformer  vs  pure_wave
-    (Standard GPT)       (Pure Wave)
-```
-**Question:** Can pure wave physics match standard transformers?
-
-### 8. 🌊 Emergent Physics Test
-```
-pure_wave  vs  pure_wave_full
- (AdamW)      (WaveOpt+QFE)
-```
-**Question:** Do emergent wave patterns improve with physics optimization?
+### Per-Head Components
+- Emitter projection waves (freqs, phases, amps)
+- Receiver projection waves (freqs, phases, amps)
+- Field projection waves (freqs, phases, amps)
+- Output projection waves (freqs, phases, amps)
+- Interference strength (per head)
+- Learned combination weights (softmax)
 
 ---
 
-## Results
+## Experiment Matrix (Updated)
 
-| Experiment | Val Loss | Perplexity | Speed | Quality |
-|------------|----------|------------|-------|---------|
-| `standard_transformer` | 4.35 | 97 | 12,357 | ✅ Coherent |
-| `wave_baseline` | 5.18 | 190 | 10,713 | ✅ Coherent |
-| `interference_attention` | ? | ? | ? | ✅ Ready (memory-optimized) |
-| `rgd_only` | ? | ? | ? | ? |
-| `qfe_only` | ? | ? | ? | ? |
-| `full_physics` | 7.86 | 2517 | 4,442 | ❌ Gibberish |
-| `interference_full` | ? | ? | ? | ? |
-| **`pure_wave`** | **10.83** | **50,485** | **134** | **🌊 WORKING - High loss, needs training** |
-| **`pure_wave_full`** | **?** | **?** | **?** | **🌊 PURE WAVE + PHYSICS** |
+| Experiment | Embed | Attention | Trinity | DC Modes | What It Tests |
+|------------|-------|-----------|---------|----------|---------------|
+| `standard_transformer` | Std | Standard | ❌ | ❌ | **CONTROL** |
+| `wave_baseline` | Wave | Hybrid | ❌ | ❌ | Wave embeddings |
+| `interference_attention` | Wave | Interference | ❌ | ❌ | Physics attention |
+| `pure_wave` | Pure | Multi-Head | ❌ | ❌ | Pure wave-to-wave |
+| `pure_wave_trinity` | Pure | Multi-Head | ✅ | ❌ | + Non-linear physics |
+| `pure_wave_dc` | Pure | Multi-Head | ❌ | ✅ | + DC modes |
+| **`pure_wave_full`** | Pure | Multi-Head | ✅ | ✅ | **FULL PHYSICS** |
 
 ---
 
-## Commands
+## Key Comparisons (Updated)
+
+### 1. DC Modes Effect (Diagonal Blindness)
+```
+pure_wave  vs  pure_wave_dc
+ (AC only)     (DC + AC)
+```
+**Question:** Do DC modes break diagonal attention patterns?
+
+### 2. Trinity Effect (Sharp Logic)
+```
+pure_wave  vs  pure_wave_trinity
+ (Linear)      (Saturation + FM + Gates)
+```
+**Question:** Does the Trinity enable sharper reasoning?
+
+### 3. Multi-Head Effect
+```
+single_head_wave  vs  multi_head_wave
+   (1 head)           (8 heads, full spectrum each)
+```
+**Question:** Do multiple heads with full spectrum improve?
+
+### 4. Full Stack vs Baseline
+```
+standard_transformer  vs  pure_wave_full
+      (GPT-2)              (DC + Trinity + Multi-Head)
+```
+**Question:** Can pure wave physics match transformers?
+
+---
+
+## Results (Updated)
+
+| Experiment | Val Loss | Perplexity | Diagonal? | Notes |
+|------------|----------|------------|-----------|-------|
+| `standard_transformer` | 4.35 | 97 | N/A | Control |
+| `wave_baseline` | 5.18 | 190 | N/A | Hybrid |
+| `pure_wave` | 6.51 | 669 | ✅ Yes | Broke unigram! But diagonal |
+| `pure_wave_trinity` | ? | ? | ? | Pending |
+| `pure_wave_dc` | ? | ? | ? | Pending |
+| **`pure_wave_full`** | ? | ? | ? | **Next experiment** |
+
+### Diagonal Blindness Status
+- **Loss 6.51 < 7.6 (unigram)**: Model IS learning beyond frequency statistics
+- **Attention plots**: Still show diagonal patterns
+- **Hypothesis**: DC modes will enable off-diagonal attention
+
+---
+
+## Commands (Updated)
 
 ```bash
-# Run single experiment
-python wave_experiments.py --experiment interference_attention --dataset fineweb --steps 10000
+# Run diagonal blindness experiments
+python wave_experiments.py --experiment diagonal_baseline --dataset fineweb --steps 5000
+python wave_experiments.py --experiment diagonal_dc --dataset fineweb --steps 5000
+python wave_experiments.py --experiment diagonal_trinity --dataset fineweb --steps 5000
+python wave_experiments.py --experiment diagonal_full --dataset fineweb --steps 5000
 
-# Run comparison pair
-python wave_experiments.py --experiment standard_transformer wave_baseline --dataset fineweb --steps 10000
-
-# Run all core experiments (the full grid)
-python wave_experiments.py --experiment standard_transformer wave_baseline interference_attention rgd_only qfe_only full_physics interference_full --dataset fineweb --steps 10000
-
-# 🌊 Run Pure Wave experiments
-python wave_experiments.py --experiment pure_wave --dataset fineweb --steps 10000
+# Run Pure Wave with all features
 python wave_experiments.py --experiment pure_wave_full --dataset fineweb --steps 10000
 
-# Compare Pure Wave vs others
-python wave_experiments.py --experiment standard_transformer interference_attention pure_wave --dataset fineweb --steps 10000
+# Compare DC modes effect
+python wave_experiments.py --experiment pure_wave pure_wave_dc --dataset fineweb --steps 5000
+
+# Compare Trinity effect
+python wave_experiments.py --experiment pure_wave pure_wave_trinity --dataset fineweb --steps 5000
+
+# Full comparison
+python wave_experiments.py --experiment standard_transformer pure_wave pure_wave_full --dataset fineweb --steps 10000
+```
+
+---
+
+## Training Logs (Updated)
+
+### PureWaveGPT Log Format
+```
+Step 100 | Loss 8.234 | LR 0.00030 | Gain 1.82 | FM 0.45 | Gate 0.67 | 9,707 tok/s
+         │            │            │           │         │
+         │            │            │           │         └─ Interferometer sharpness
+         │            │            │           └─ FM modulation index
+         │            │            └─ Saturation gain (>1 = sharp)
+         │            └─ Learning rate
+         └─ Cross-entropy loss
+```
+
+### Standard WaveGPT Log Format
+```
+Step 100 | Loss 8.234 | LR 0.00030 | R 0.85 | 10,234 tok/s
+                                    │
+                                    └─ Annealing ratio (wave ↔ standard)
 ```
 
 ---
@@ -219,24 +240,42 @@ python wave_experiments.py --experiment standard_transformer interference_attent
 ## Conclusions (To Fill In)
 
 ### What Works
-- [ ] Wave embeddings (wave_baseline competitive with standard_transformer?)
-- [ ] Interference attention (interference_attention beats wave_baseline?)
-- [ ] Physics optimizer (rgd_only beats wave_baseline?)
-- [ ] Coherence loss (qfe_only beats wave_baseline?)
-- [ ] **🌊 Pure wave architecture (pure_wave competitive with standard_transformer?)**
-- [ ] **🌊 Emergent wave patterns (pure_wave shows learnable decay/re-emergence?)**
+- [x] Pure wave architecture (loss 6.51 < unigram 7.6)
+- [x] Multi-head wave interference
+- [ ] DC modes for global attention (pending)
+- [ ] Trinity for sharp logic (pending)
+- [ ] Full stack competitive with transformers (pending)
 
-### What Doesn't Work
-- [ ] (To be determined)
+### What Doesn't Work (Yet)
+- [x] Diagonal blindness persists without DC modes
+- [ ] (More to be determined)
 
-### Best Configuration
-- [ ] (To be determined from experiments)
+### Best Configuration (Hypothesis)
+```
+pure_wave_full = DC Modes + Trinity + Multi-Head + 4x MLP
+```
 
-### 🌊 Pure Wave Hypothesis
-**If pure wave works, we should see:**
-1. **Frequency specialization:** Function words → low freq, content words → high freq
-2. **Emergent beating:** Attention patterns with periodic structure
-3. **Learned dependencies:** Beat periods matching linguistic distances
-4. **No hardcoded patterns:** All structure emerges from learned wave physics
+### Key Metrics to Watch
+1. **Loss**: Should be < 6.5 (current best)
+2. **Attention plots**: Should show off-diagonal patterns with DC modes
+3. **Generation quality**: Should be coherent, not repetitive
+4. **Trinity metrics**: Gain > 1.5, FM > 0.3, Gate variance > 0.1
 
-**Key test:** Does `pure_wave` match `standard_transformer` performance while showing emergent wave physics?
+---
+
+## Theoretical Predictions
+
+### DC Modes Should Enable:
+1. **Global attention**: Token 0 can attend to Token 5000 if phases align
+2. **Content-based routing**: Attention based on semantic similarity, not position
+3. **Breaking diagonal**: Off-diagonal patterns in attention visualization
+
+### Trinity Should Enable:
+1. **Sharp decisions**: Binary-like outputs from saturation
+2. **Context sensitivity**: FM makes meaning position-dependent
+3. **Information gating**: Interferometer can block irrelevant info
+
+### Multi-Head Should Enable:
+1. **Diverse patterns**: Each head learns different attention patterns
+2. **Full spectrum**: No artificial frequency constraints
+3. **Learned combination**: Softmax weights for head mixing
