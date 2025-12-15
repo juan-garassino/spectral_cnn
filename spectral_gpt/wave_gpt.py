@@ -498,6 +498,10 @@ class InterferenceAttention(nn.Module):
         # Compute phasors: A * e^(iθ)
         phasor = amp * torch.exp(1j * theta.to(torch.complex64))  # (B, H, T, W) complex
         
+        # Attention scores = Re(phasor_q @ phasor_k^H) / sqrt(W)
+        scores = torch.matmul(phasor, phasor.conj().transpose(-2, -1)).real  # (B, H, T, T)
+        scores = scores / (self.num_waves ** 0.5)  # Scale like standard attention
+        
         # Temperature scaling
         scores = scores * self.temperature
         
