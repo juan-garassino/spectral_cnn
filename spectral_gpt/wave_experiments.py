@@ -857,8 +857,15 @@ def train_experiment(
                 total_tokens += x.numel()
                 
                 # Forward with annealing ratio (Requirements 6.1, 6.2)
-                # Pass standard_embed_ratio to model for embedding annealing
-                logits, ce_loss = model(x, y, standard_embed_ratio=current_annealing_ratio)
+                # Pass standard_embed_ratio only to models that support it
+                base_model = model.module if hasattr(model, 'module') else model
+                
+                if hasattr(base_model, 'wave_excitation'):
+                    # PureWaveGPT - no annealing needed
+                    logits, ce_loss = model(x, y)
+                else:
+                    # WaveGPT - supports annealing
+                    logits, ce_loss = model(x, y, standard_embed_ratio=current_annealing_ratio)
                 
                 # Compute loss
                 if exp_config.use_qfe and loss_fn is not None:
