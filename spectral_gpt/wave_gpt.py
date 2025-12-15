@@ -1963,11 +1963,14 @@ class WaveCollapse(nn.Module):
         
         # === WAVE ATTENTION ===
         # Combine processed wave parameters
+        # Summarize amplitudes: sum across harmonics to get per-wave amplitude
+        amps_per_wave = processed_amps.sum(dim=-1)  # (B, T, W) - sum harmonics
+        
         wave_features = torch.cat([
             processed_freqs,
             processed_phases,
-            processed_amps_flat.view(B, T, W)  # Summarize amps per wave
-        ], dim=-1)  # (B, T, wave_dim)
+            amps_per_wave  # Summarized amps per wave
+        ], dim=-1)  # (B, T, wave_dim = 3*W)
         
         # Self-attention over wave parameters
         attended_waves, _ = self.wave_attention(wave_features, wave_features, wave_features)
