@@ -1225,6 +1225,38 @@ class PureWaveGPT(nn.Module):
                 return wave_state
         
         return wave_state
+    
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        """
+        Generate tokens one by one for PureWaveGPT
+        """
+        for _ in range(max_new_tokens):
+            # Crop to block size if needed
+            if idx.size(1) > self.config.block_size:
+                idx_cond = idx[:, -self.config.block_size:]
+            else:
+                idx_cond = idx
+                
+            # Forward
+            logits, _ = self(idx_cond)
+            
+            # Select last step
+            logits = logits[:, -1, :] / temperature
+            
+            # Top-K sampling (optional)
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+                
+            # Sample
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            
+            # Append
+            idx = torch.cat((idx, idx_next), dim=1)
+            
+        return idx # Return full sequence
 
 
 class PureWaveExcitation(nn.Module):
@@ -1253,7 +1285,8 @@ class PureWaveExcitation(nn.Module):
         # Multi-scale frequency initialization
         # Each token gets a spectrum of frequencies (low → global, high → local)
         freq_scales = torch.logspace(-1, 1, num_waves)  # 0.1 to 10.0
-        init_freqs = base_freq.unsqueeze(1) * freq_scales.unsqueeze(0) * 0.1
+        # FIXED: Remove the 0.1 scaling that was making frequencies too small
+        init_freqs = base_freq.unsqueeze(1) * freq_scales.unsqueeze(0) * 0.01  # Much smaller scale for stability
         self.base_freqs = nn.Parameter(init_freqs)  # (vocab_size, num_waves) - LEARNABLE!
         
         # === HARMONIC MULTIPLIERS ===
@@ -1267,7 +1300,9 @@ class PureWaveExcitation(nn.Module):
         # === AMPLITUDES (learnable with 1/n prior) ===
         base_amps = 1.0 / harmonic_mults  # [1, 0.5, 0.33, 0.25]
         init_amps = base_amps.view(1, 1, -1).expand(vocab_size, num_waves, -1).clone()
-        init_amps = init_amps * (1.0 + torch.randn_like(init_amps) * 0.1)  # Small variation
+        # FIXED: Smaller initial amplitudes for stability
+        init_amps = init_amps * 0.1 * (1.0 + torch.randn_like(init_amps) * 0.1)  # Much smaller initial scale
+        init_amps = torch.clamp(init_amps, min=0.01, max=1.0)  # Ensure positive and bounded
         self.amplitudes = nn.Parameter(init_amps)  # (vocab_size, num_waves, num_harmonics) - LEARNABLE!
         
     def forward(self, token_ids):
@@ -1413,6 +1448,16 @@ class PureWaveInterference(nn.Module):
         # Learnable physics parameters
         self.temperature = nn.Parameter(torch.ones(1))
         
+        # FIXED: Initialize projections with smaller weights for stability
+        with torch.no_grad():
+            for module in [self.q_freq_proj, self.k_freq_proj, self.v_freq_proj,
+                          self.q_phase_proj, self.k_phase_proj, self.v_phase_proj,
+                          self.q_amp_proj, self.k_amp_proj, self.v_amp_proj,
+                          self.out_freq_proj, self.out_phase_proj, self.out_amp_proj]:
+                module.weight.data *= 0.1
+                if module.bias is not None:
+                    module.bias.data.zero_()
+        
     def forward(self, wave_state: WaveState) -> WaveState:
         """
         Wave interference attention.
@@ -1427,18 +1472,20 @@ class PureWaveInterference(nn.Module):
         amps_flat = wave_state.amps.view(B, T, -1)  # (B, T, W*H)
         
         # === PROJECT TO Q, K WAVES ===
-        q_freqs = F.softplus(self.q_freq_proj(wave_state.freqs)).view(B, T, H, W).transpose(1, 2)
+        # FIXED: Add proper scaling to prevent explosion
+        q_freqs = F.softplus(self.q_freq_proj(wave_state.freqs) * 0.1).view(B, T, H, W).transpose(1, 2)
         q_phases = self.q_phase_proj(wave_state.phases).view(B, T, H, W).transpose(1, 2)
-        q_amps = F.softplus(self.q_amp_proj(amps_flat)).view(B, T, H, W).transpose(1, 2)
+        q_amps = F.softplus(self.q_amp_proj(amps_flat) * 0.1).view(B, T, H, W).transpose(1, 2)
         
-        k_freqs = F.softplus(self.k_freq_proj(wave_state.freqs)).view(B, T, H, W).transpose(1, 2)
+        k_freqs = F.softplus(self.k_freq_proj(wave_state.freqs) * 0.1).view(B, T, H, W).transpose(1, 2)
         k_phases = self.k_phase_proj(wave_state.phases).view(B, T, H, W).transpose(1, 2)
-        k_amps = F.softplus(self.k_amp_proj(amps_flat)).view(B, T, H, W).transpose(1, 2)
+        k_amps = F.softplus(self.k_amp_proj(amps_flat) * 0.1).view(B, T, H, W).transpose(1, 2)
         
         # === PROJECT TO V WAVES ===
-        v_freqs = F.softplus(self.v_freq_proj(wave_state.freqs))  # (B, T, W)
+        # FIXED: Add proper scaling to prevent explosion
+        v_freqs = F.softplus(self.v_freq_proj(wave_state.freqs) * 0.1)  # (B, T, W)
         v_phases = self.v_phase_proj(wave_state.phases)
-        v_amps = F.softplus(self.v_amp_proj(amps_flat)).view(B, T, W, -1)
+        v_amps = F.softplus(self.v_amp_proj(amps_flat) * 0.1).view(B, T, W, -1)
         
         # === PHASE EVOLUTION ===
         positions = torch.arange(T, device=device, dtype=torch.float32)
@@ -1538,6 +1585,15 @@ class PureWaveMLP(nn.Module):
         self.num_waves = num_waves
         self.num_harmonics = num_harmonics
         
+        # FIXED: Initialize MLP weights smaller for stability
+        with torch.no_grad():
+            for module in [self.freq_mlp, self.phase_mlp, self.amp_mlp]:
+                for layer in module:
+                    if isinstance(layer, nn.Linear):
+                        layer.weight.data *= 0.1
+                        if layer.bias is not None:
+                            layer.bias.data.zero_()
+        
     def forward(self, wave_state: WaveState) -> WaveState:
         B, T, W = wave_state.freqs.shape
         
@@ -1588,21 +1644,41 @@ class WaveCollapse(nn.Module):
         # Wave state dimension
         wave_dim = num_waves + num_waves + num_waves * num_harmonics  # freqs + phases + amps
         
-        # Projection to vocabulary
+        # FIXED: Add normalization and proper scaling
+        self.wave_norm = nn.LayerNorm(wave_dim)
         self.collapse_proj = nn.Linear(wave_dim, vocab_size)
+        
+        # Initialize with smaller weights for stability
+        with torch.no_grad():
+            self.collapse_proj.weight.data *= 0.1
+            if self.collapse_proj.bias is not None:
+                self.collapse_proj.bias.data.zero_()
         
     def forward(self, wave_state: WaveState) -> torch.Tensor:
         B, T, W = wave_state.freqs.shape
         
-        # Concatenate all wave parameters
+        # Normalize wave parameters to reasonable ranges
+        # Frequencies: normalize to [-1, 1] range
+        freq_norm = torch.tanh(wave_state.freqs * 0.1)
+        
+        # Phases: normalize to [-1, 1] range  
+        phase_norm = torch.sin(wave_state.phases)  # Natural [-1, 1] range
+        
+        # Amplitudes: already in reasonable range, just clamp
         amps_flat = wave_state.amps.view(B, T, -1)
+        amp_norm = torch.clamp(amps_flat, min=0.0, max=2.0)
+        
+        # Concatenate normalized wave parameters
         wave_vector = torch.cat([
-            wave_state.freqs,
-            wave_state.phases,
-            amps_flat
+            freq_norm,
+            phase_norm, 
+            amp_norm
         ], dim=-1)  # (B, T, wave_dim)
         
-        # Collapse to logits
+        # FIXED: Add layer normalization before projection
+        wave_vector = self.wave_norm(wave_vector)
+        
+        # Collapse to logits with proper scaling
         logits = self.collapse_proj(wave_vector)  # (B, T, vocab_size)
         
         return logits

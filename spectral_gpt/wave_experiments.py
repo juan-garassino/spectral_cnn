@@ -330,7 +330,7 @@ ABLATION_EXPERIMENTS = {
         model_type="pure_wave",  # New model type!
         use_rgd=False, use_qfe=False,
         use_interference_attention=True,  # Always true for pure wave
-        lr=3e-4, dropout=0.1,
+        lr=1e-4, dropout=0.1,  # FIXED: Lower learning rate for stability
         # Pure wave has different parameter structure
     ),
     
@@ -339,8 +339,8 @@ ABLATION_EXPERIMENTS = {
         model_type="pure_wave",
         use_rgd=True, use_qfe=True,
         use_interference_attention=True,
-        lr=1e-3, dropout=0.0,
-        qfe_lambda=0.1
+        lr=5e-4, dropout=0.0,  # FIXED: Lower learning rate for stability
+        qfe_lambda=0.05  # FIXED: Lower QFE lambda for stability
     ),
 
     # ============================================================

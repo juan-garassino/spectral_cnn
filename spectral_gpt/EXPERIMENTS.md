@@ -177,7 +177,7 @@ pure_wave  vs  pure_wave_full
 | `qfe_only` | ? | ? | ? | ? |
 | `full_physics` | 7.86 | 2517 | 4,442 | ❌ Gibberish |
 | `interference_full` | ? | ? | ? | ? |
-| **`pure_wave`** | **?** | **?** | **?** | **🌊 PURE WAVE TEST** |
+| **`pure_wave`** | **10.83** | **50,485** | **134** | **🌊 WORKING - High loss, needs training** |
 | **`pure_wave_full`** | **?** | **?** | **?** | **🌊 PURE WAVE + PHYSICS** |
 
 ---
