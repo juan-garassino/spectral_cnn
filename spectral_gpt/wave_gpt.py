@@ -152,33 +152,29 @@ class WavePacketEmbedding(nn.Module):
         masses = 1.0 / (token_indices + 1.0)  # Zipfian: Mass(i) = 1/(i+1)
         self.register_buffer('masses', masses)  # (vocab_size,)
         
-        # === Requirement 1.2: Mass-frequency relationship with FIBONACCI SPACING ===
-        # Each token gets a SPECTRUM of frequencies using golden ratio spacing!
-        # 
-        # Why Fibonacci/Golden Ratio?
-        # - Found throughout nature (sunflowers, galaxies, DNA)
-        # - Creates optimal packing - frequencies don't collide/resonate destructively
-        # - Each frequency is maximally different from neighbors
+        # === Requirement 1.2: MULTI-SCALE frequency spectrum ===
+        # Each token gets frequencies at DIFFERENT SCALES for multi-resolution attention:
+        # - Low freq (0.01-0.1): peaks every 60-600 tokens → document-level context
+        # - Mid freq (0.1-1.0): peaks every 6-60 tokens → paragraph-level context  
+        # - High freq (1.0-10.0): peaks every 0.6-6 tokens → local/word-level context
         #
-        # Golden ratio: φ = (1 + √5) / 2 ≈ 1.618
-        #
-        phi = (1 + math.sqrt(5)) / 2  # Golden ratio ≈ 1.618
+        # This is like wavelets - different frequencies capture different scales!
         
-        # BOUNDED center frequency using log-compression
-        # Raw: 1/sqrt(mass) ranges from 1 to 224 for 50k vocab
-        # Compressed: log(1 + raw) keeps it in reasonable range [0.7, 5.4]
+        phi = (1 + math.sqrt(5)) / 2  # Golden ratio for spacing
+        
+        # Create LOG-SPACED frequencies from 0.01 to 10.0 (3 orders of magnitude)
+        # This ensures we have low, medium, AND high frequencies
+        freq_min, freq_max = 0.02, 5.0  # Cycles per position
+        log_freqs = torch.logspace(math.log10(freq_min), math.log10(freq_max), num_waves)
+        
+        # Add small token-dependent offset using mass (common tokens slightly lower freq)
+        # This gives each token a unique "fingerprint" while keeping the multi-scale structure
         raw_center_freq = 1.0 / torch.sqrt(masses)  # (vocab_size,)
-        center_freq = torch.log1p(raw_center_freq)  # Compress to [0.7, 5.4] range
+        token_offset = torch.log1p(raw_center_freq) / 10.0  # Small offset [0.07, 0.54]
         
-        # Fibonacci-inspired frequency spread using golden ratio powers
-        # Gentler spread: φ^(i * 0.3) gives range of ~[0.5, 2.0] across waves
-        wave_indices = torch.arange(num_waves, dtype=torch.float32) - (num_waves - 1) / 2
-        freq_multipliers = torch.pow(torch.tensor(phi), wave_indices * 0.3)
-        
-        # Each token gets the full golden-ratio spectrum
-        # Final range: roughly [0.35, 10.8] - much more reasonable!
+        # Each token gets the full spectrum, slightly shifted by its mass
         # Shape: (vocab_size, num_waves)
-        init_base_frequencies = center_freq.unsqueeze(1) * freq_multipliers.unsqueeze(0)
+        init_base_frequencies = log_freqs.unsqueeze(0) * (1.0 + token_offset.unsqueeze(1) * 0.1)
         self.base_freqs = nn.Parameter(init_base_frequencies.clone())  # LEARNABLE!
         
         # === Requirement 1.3: Harmonic quantization ===
@@ -193,19 +189,22 @@ class WavePacketEmbedding(nn.Module):
         init_harmonic_amplitudes = init_harmonic_amplitudes.view(1, 1, num_harmonics).expand(vocab_size, num_waves, -1).clone()
         self.harmonic_amps = nn.Parameter(init_harmonic_amplitudes)  # NOW LEARNABLE!
         
-        # === Phases with GOLDEN ANGLE initialization ===
-        # Golden angle = 2π / φ² ≈ 137.5° - creates optimal phase distribution
-        # This ensures phases are maximally spread out, not clustered
-        golden_angle = 2 * math.pi / (phi ** 2)  # ≈ 2.399 radians ≈ 137.5°
+        # === Phases: Random initialization with structure ===
+        # Golden angle creates too rigid a pattern. Use random init with some structure:
+        # - Random base phase per token (allows learning unique token "signatures")
+        # - Small wave-dependent offset (breaks symmetry between waves)
         
-        # Initialize phases using golden angle spiral
-        # Each wave gets a different base phase, each token adds golden angle offset
-        wave_phase_offset = torch.arange(num_waves, dtype=torch.float32) * golden_angle
-        token_phase_offset = torch.arange(vocab_size, dtype=torch.float32) * golden_angle
+        golden_angle = 2 * math.pi / (phi ** 2)
         
-        # Combine: phase[token, wave] = (token * φ_golden + wave * φ_golden) mod 2π
-        init_phases = (token_phase_offset.unsqueeze(1) + wave_phase_offset.unsqueeze(0)) % (2 * math.pi)
-        self.phases = nn.Parameter(init_phases)  # LEARNABLE - should update during training!
+        # Random phase per token, plus small structured offset per wave
+        random_token_phase = torch.rand(vocab_size, 1) * 2 * math.pi
+        wave_offset = torch.arange(num_waves, dtype=torch.float32).unsqueeze(0) * golden_angle * 0.1
+        
+        # Add small random noise to break any remaining patterns
+        noise = torch.randn(vocab_size, num_waves) * 0.3
+        
+        init_phases = (random_token_phase + wave_offset + noise) % (2 * math.pi)
+        self.phases = nn.Parameter(init_phases)  # LEARNABLE!
         
         # Project wave state to d_model dimension
         # num_waves * num_harmonics * 2 (sin + cos) + num_waves (phase) + num_waves (freq)
