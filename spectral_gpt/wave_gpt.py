@@ -212,16 +212,15 @@ class WavePacketEmbedding(nn.Module):
         wave_dim = num_waves * num_harmonics * 2 + num_waves * 2
         self.wave_to_embed = nn.Linear(wave_dim, d_model)
         
-        # Initialize wave_to_embed with larger weights for phase/freq pathways
+        # Initialize wave_to_embed with slightly larger weights for phase/freq pathways
         # This ensures gradients flow back to phases and frequencies
+        # NOTE: 10x was too aggressive and caused instability, using 3x instead
         with torch.no_grad():
-            # Standard init for sin/cos part
             sin_cos_dim = num_waves * num_harmonics * 2
-            # Larger init for phase/freq part (last 2*num_waves columns)
-            self.wave_to_embed.weight[:, sin_cos_dim:] *= 10.0  # 10x larger weights
+            self.wave_to_embed.weight[:, sin_cos_dim:] *= 3.0  # 3x larger weights (was 10x)
         
-        # Learnable scale for phase contribution (starts at 1.0 for strong gradients)
-        self.phase_scale = nn.Parameter(torch.ones(1))
+        # Learnable scale for phase contribution (starts smaller for stability)
+        self.phase_scale = nn.Parameter(torch.tensor(0.5))  # Start at 0.5, not 1.0
         
         # Positional wave modulation
         self.pos_freq = nn.Parameter(torch.randn(1, 1, num_waves) * 0.1)
@@ -271,11 +270,11 @@ class WavePacketEmbedding(nn.Module):
         
         # === DIRECT PHASE PATHWAY for stronger gradients ===
         # The sin/cos pathway dilutes phase gradients. Add direct phase info.
-        # Normalize phases to [-1, 1] range and scale for strong gradients
+        # Normalize phases to [-1, 1] range and scale for stability
         phase_direct = self.phase_scale * ((phases / math.pi) - 1.0)  # (B, T, num_waves)
         
-        # Also add frequency info directly (helps freq learning too)
-        freq_direct = torch.log1p(base_f)  # Log-compressed frequencies
+        # Also add frequency info directly (normalized to similar scale as phases)
+        freq_direct = torch.log1p(base_f) / 5.0  # Normalize to ~[0, 1] range
         
         # Flatten: (B, T, W*H*2 + W + W)
         wave_state = torch.cat([
@@ -461,9 +460,17 @@ class InterferenceAttention(nn.Module):
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Memory-efficient wave interference attention using phasor decomposition.
+        Wave interference attention - simplified for stable optimization.
         
-        Memory: O(B*H*T*T) instead of O(B*H*T*T*W)
+        Instead of full interference formula (which has poor gradient properties),
+        we use amplitude-weighted phase similarity:
+        
+        score[q,k] = sum_w(A_q * A_k * cos(θ_q - θ_k))
+        
+        This is like dot-product attention but in wave space:
+        - Amplitude = magnitude (like vector length)
+        - Phase = direction (like vector angle)
+        - cos(Δθ) = alignment (like cosine similarity)
         """
         B, T, C = x.shape
         device = x.device
@@ -484,55 +491,22 @@ class InterferenceAttention(nn.Module):
         t_pos = torch.arange(T, device=device, dtype=dtype).view(1, 1, T, 1)  # (1, 1, T, 1)
         theta = freq * t_pos + phase_0  # (B, H, T, W) - evolved phase at each position
         
-        # === PHASOR DECOMPOSITION (Memory-Efficient) ===
-        #
-        # Full interference formula:
-        # I[q,k] = sum_w(A_q² + A_k² + 2*A_q*A_k*cos(θ_q - θ_k))
-        #
-        # Decompose into three terms:
-        # Term 1: sum_w(A_q²) - shape (B, H, T), broadcast to (B, H, T, T)
-        # Term 2: sum_w(A_k²) - shape (B, H, T), broadcast to (B, H, T, T)
-        # Term 3: 2*Re(phasor_q · phasor_k*) where phasor = sum_w(A * e^(iθ))
-        #
-        # The key insight: sum_w(A_q*A_k*cos(θ_q - θ_k)) = Re(sum_w(A_q*e^(iθ_q)) · sum_w(A_k*e^(-iθ_k)))
-        # This lets us compute the cross term as a (B,H,T) x (B,H,T) outer product!
+        # === SIMPLIFIED INTERFERENCE: Amplitude-weighted phase similarity ===
+        # score[q,k] = Re(phasor_q · phasor_k*) where phasor = A * e^(iθ)
+        # This is analogous to Q @ K.T but in wave space
         
-        # Term 1 & 2: Amplitude squared sums (B, H, T)
-        amp_sq_sum = (amp ** 2).sum(dim=-1)  # (B, H, T)
+        # Compute phasors: A * e^(iθ)
+        phasor = amp * torch.exp(1j * theta.to(torch.complex64))  # (B, H, T, W) complex
         
-        # Term 3: Phasor approach
-        # phasor[t] = sum_w(A[t,w] * e^(i*θ[t,w]))
-        # Shape: (B, H, T) complex
-        phasor = (amp * torch.exp(1j * theta.to(torch.complex64))).sum(dim=-1)  # (B, H, T) complex
+        # Temperature scaling
+        scores = scores * self.temperature
         
-        # Cross term = 2 * Re(phasor_q · phasor_k*)
-        # phasor: (B, H, T) -> outer product gives (B, H, T, T)
-        cross_term = 2 * (phasor.unsqueeze(-1) * phasor.conj().unsqueeze(-2)).real  # (B, H, T, T)
-        
-        # Total intensity: I = sum(A_q²) + sum(A_k²) + 2*Re(phasor_q · phasor_k*)
-        intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term  # (B, H, T, T)
-        
-        # === Causal masking (Requirement 2.4) ===
+        # === Causal masking ===
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-        
-        # === Normalization Strategy ===
-        # Option A: Pure physics (energy normalization) - can plateau
-        # Option B: Hybrid (interference scores + softmax) - more stable training
-        # 
-        # We use softmax on the interference intensity for stable gradients,
-        # but the SCORES come from physics (not dot products)
-        
-        # Scale intensity for softmax (like temperature in standard attention)
-        # The interference values can be large, so we normalize by sqrt(num_waves)
-        scaled_intensity = intensity * self.temperature / (self.num_waves ** 0.5)
-        
-        # Apply causal mask before softmax
-        scaled_intensity = scaled_intensity.masked_fill(causal_mask, float('-inf'))
+        scores = scores.masked_fill(causal_mask, float('-inf'))
         
         # Softmax for stable probability distribution
-        # KEY: The ranking/relative scores come from interference physics!
-        attn_weights = F.softmax(scaled_intensity, dim=-1)
-        # Dropout
+        attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         
         # Apply to values
@@ -545,7 +519,7 @@ class InterferenceAttention(nn.Module):
         return out
     
     def get_interference_pattern(self, x: torch.Tensor) -> torch.Tensor:
-        """Get raw interference pattern for visualization (before normalization)."""
+        """Get raw interference scores for visualization."""
         B, T, C = x.shape
         device = x.device
         dtype = x.dtype
@@ -558,44 +532,23 @@ class InterferenceAttention(nn.Module):
         t_pos = torch.arange(T, device=device, dtype=dtype).view(1, 1, T, 1)
         theta = freq * t_pos + phase_0
         
-        amp_sq_sum = (amp ** 2).sum(dim=-1)
-        phasor = (amp * torch.exp(1j * theta.to(torch.complex64))).sum(dim=-1)
-        cross_term = 2 * (phasor.unsqueeze(-1) * phasor.conj().unsqueeze(-2)).real
-        
-        intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term
+        phasor = amp * torch.exp(1j * theta.to(torch.complex64))
+        scores = torch.matmul(phasor, phasor.conj().transpose(-2, -1)).real
+        scores = scores / (self.num_waves ** 0.5)
         
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-        return intensity.masked_fill(causal_mask, 0.0)
+        return scores.masked_fill(causal_mask, 0.0)
     
     def get_interference_weights(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Get the normalized interference weights for visualization/debugging.
-        Uses the same phasor decomposition as forward() for memory efficiency.
-        """
-        B, T, C = x.shape
-        device = x.device
-        dtype = x.dtype
+        """Get normalized attention weights."""
+        scores = self.get_interference_pattern(x)
+        T = scores.size(-1)
+        device = scores.device
         
-        freq = self.freq_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
-        phase_0 = self.phase_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
-        amp = self.amp_proj(x).view(B, T, self.num_heads, self.num_waves).transpose(1, 2)
-        amp = F.softplus(amp) + self.eps
-        
-        t_pos = torch.arange(T, device=device, dtype=dtype).view(1, 1, T, 1)
-        theta = freq * t_pos + phase_0
-        
-        # Phasor decomposition (memory-efficient)
-        amp_sq_sum = (amp ** 2).sum(dim=-1)
-        phasor = (amp * torch.exp(1j * theta.to(torch.complex64))).sum(dim=-1)
-        cross_term = 2 * (phasor.unsqueeze(-1) * phasor.conj().unsqueeze(-2)).real
-        
-        intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term
-        
-        # Causal mask and softmax (same as forward)
+        scores = scores * self.temperature
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-        scaled_intensity = intensity * self.temperature / (self.num_waves ** 0.5)
-        scaled_intensity = scaled_intensity.masked_fill(causal_mask, float('-inf'))
-        return F.softmax(scaled_intensity, dim=-1)
+        scores = scores.masked_fill(causal_mask, float('-inf'))
+        return F.softmax(scores, dim=-1)
 
 
 # ==========================================
