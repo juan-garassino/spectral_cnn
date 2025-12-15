@@ -152,13 +152,34 @@ class WavePacketEmbedding(nn.Module):
         masses = 1.0 / (token_indices + 1.0)  # Zipfian: Mass(i) = 1/(i+1)
         self.register_buffer('masses', masses)  # (vocab_size,)
         
-        # === Requirement 1.2: Mass-frequency relationship ===
-        # LEARNABLE frequencies initialized with physics prior: ω_0 = 1.0 / sqrt(Mass)
-        # Heavy tokens start with low freq, light tokens start with high freq
-        # But the model can learn to adjust these!
-        init_base_frequencies = 1.0 / torch.sqrt(masses)  # (vocab_size,)
-        init_base_frequencies = init_base_frequencies.unsqueeze(1).expand(-1, num_waves).clone()
-        self.base_freqs = nn.Parameter(init_base_frequencies)  # NOW LEARNABLE!
+        # === Requirement 1.2: Mass-frequency relationship with FIBONACCI SPACING ===
+        # Each token gets a SPECTRUM of frequencies using golden ratio spacing!
+        # 
+        # Why Fibonacci/Golden Ratio?
+        # - Found throughout nature (sunflowers, galaxies, DNA)
+        # - Creates optimal packing - frequencies don't collide/resonate destructively
+        # - Each frequency is maximally different from neighbors
+        #
+        # Golden ratio: φ = (1 + √5) / 2 ≈ 1.618
+        #
+        phi = (1 + math.sqrt(5)) / 2  # Golden ratio ≈ 1.618
+        
+        # BOUNDED center frequency using log-compression
+        # Raw: 1/sqrt(mass) ranges from 1 to 224 for 50k vocab
+        # Compressed: log(1 + raw) keeps it in reasonable range [0.7, 5.4]
+        raw_center_freq = 1.0 / torch.sqrt(masses)  # (vocab_size,)
+        center_freq = torch.log1p(raw_center_freq)  # Compress to [0.7, 5.4] range
+        
+        # Fibonacci-inspired frequency spread using golden ratio powers
+        # Gentler spread: φ^(i * 0.3) gives range of ~[0.5, 2.0] across waves
+        wave_indices = torch.arange(num_waves, dtype=torch.float32) - (num_waves - 1) / 2
+        freq_multipliers = torch.pow(torch.tensor(phi), wave_indices * 0.3)
+        
+        # Each token gets the full golden-ratio spectrum
+        # Final range: roughly [0.35, 10.8] - much more reasonable!
+        # Shape: (vocab_size, num_waves)
+        init_base_frequencies = center_freq.unsqueeze(1) * freq_multipliers.unsqueeze(0)
+        self.base_freqs = nn.Parameter(init_base_frequencies.clone())  # LEARNABLE!
         
         # === Requirement 1.3: Harmonic quantization ===
         # Harmonic multipliers - keep as buffer (structural, not learned)
@@ -172,14 +193,35 @@ class WavePacketEmbedding(nn.Module):
         init_harmonic_amplitudes = init_harmonic_amplitudes.view(1, 1, num_harmonics).expand(vocab_size, num_waves, -1).clone()
         self.harmonic_amps = nn.Parameter(init_harmonic_amplitudes)  # NOW LEARNABLE!
         
-        # Phases: where in the wave cycle does this token start?
-        # Learnable phases for expressivity
-        self.phases = nn.Parameter(torch.rand(vocab_size, num_waves) * 2 * math.pi)
+        # === Phases with GOLDEN ANGLE initialization ===
+        # Golden angle = 2π / φ² ≈ 137.5° - creates optimal phase distribution
+        # This ensures phases are maximally spread out, not clustered
+        golden_angle = 2 * math.pi / (phi ** 2)  # ≈ 2.399 radians ≈ 137.5°
+        
+        # Initialize phases using golden angle spiral
+        # Each wave gets a different base phase, each token adds golden angle offset
+        wave_phase_offset = torch.arange(num_waves, dtype=torch.float32) * golden_angle
+        token_phase_offset = torch.arange(vocab_size, dtype=torch.float32) * golden_angle
+        
+        # Combine: phase[token, wave] = (token * φ_golden + wave * φ_golden) mod 2π
+        init_phases = (token_phase_offset.unsqueeze(1) + wave_phase_offset.unsqueeze(0)) % (2 * math.pi)
+        self.phases = nn.Parameter(init_phases)  # LEARNABLE - should update during training!
         
         # Project wave state to d_model dimension
-        # num_waves * num_harmonics * 2 (sin + cos)
-        wave_dim = num_waves * num_harmonics * 2
+        # num_waves * num_harmonics * 2 (sin + cos) + num_waves (phase) + num_waves (freq)
+        wave_dim = num_waves * num_harmonics * 2 + num_waves * 2
         self.wave_to_embed = nn.Linear(wave_dim, d_model)
+        
+        # Initialize wave_to_embed with larger weights for phase/freq pathways
+        # This ensures gradients flow back to phases and frequencies
+        with torch.no_grad():
+            # Standard init for sin/cos part
+            sin_cos_dim = num_waves * num_harmonics * 2
+            # Larger init for phase/freq part (last 2*num_waves columns)
+            self.wave_to_embed.weight[:, sin_cos_dim:] *= 10.0  # 10x larger weights
+        
+        # Learnable scale for phase contribution (starts at 1.0 for strong gradients)
+        self.phase_scale = nn.Parameter(torch.ones(1))
         
         # Positional wave modulation
         self.pos_freq = nn.Parameter(torch.randn(1, 1, num_waves) * 0.1)
@@ -187,8 +229,9 @@ class WavePacketEmbedding(nn.Module):
         # === Requirement 1.5: Standard embedding for annealing ===
         self.simple_embed = nn.Embedding(vocab_size, d_model)
         
-        # LayerNorm for final output stability
-        self.ln = nn.LayerNorm(d_model)
+        # Use learned scaling instead of LayerNorm (LN kills gradients to phases/freqs)
+        # RMSNorm-style: just scale by learned parameter, no mean subtraction
+        self.output_scale = nn.Parameter(torch.ones(d_model))
         
     def forward(self, token_ids, standard_embed_ratio=0.0):
         """
@@ -226,10 +269,20 @@ class WavePacketEmbedding(nn.Module):
         sin_waves = harm_a * torch.sin(wave_phase)  # (B, T, W, H)
         cos_waves = harm_a * torch.cos(wave_phase)  # (B, T, W, H)
         
-        # Flatten: (B, T, W*H*2)
+        # === DIRECT PHASE PATHWAY for stronger gradients ===
+        # The sin/cos pathway dilutes phase gradients. Add direct phase info.
+        # Normalize phases to [-1, 1] range and scale for strong gradients
+        phase_direct = self.phase_scale * ((phases / math.pi) - 1.0)  # (B, T, num_waves)
+        
+        # Also add frequency info directly (helps freq learning too)
+        freq_direct = torch.log1p(base_f)  # Log-compressed frequencies
+        
+        # Flatten: (B, T, W*H*2 + W + W)
         wave_state = torch.cat([
             sin_waves.reshape(B, T, -1),
-            cos_waves.reshape(B, T, -1)
+            cos_waves.reshape(B, T, -1),
+            phase_direct,  # Direct phase pathway!
+            freq_direct    # Direct frequency pathway!
         ], dim=-1)
         
         # Project to embedding dimension
@@ -244,8 +297,9 @@ class WavePacketEmbedding(nn.Module):
         else:
             embeddings = wave_embed
         
-        # LayerNorm for stability
-        embeddings = self.ln(embeddings)
+        # Scale output (RMSNorm-style, preserves gradients unlike LayerNorm)
+        rms = embeddings.pow(2).mean(dim=-1, keepdim=True).sqrt().clamp(min=1e-8)
+        embeddings = embeddings / rms * self.output_scale
         
         return embeddings
     
@@ -458,28 +512,26 @@ class InterferenceAttention(nn.Module):
         # Total intensity: I = sum(A_q²) + sum(A_k²) + 2*Re(phasor_q · phasor_k*)
         intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term  # (B, H, T, T)
         
-        # === Energy normalization (Requirement 2.5) ===
-        # Normalize by maximum possible intensity when waves perfectly align
-        # Max intensity per wave: (A_q + A_k)² when cos=1
-        # Approximation: use (sum_w A_q + sum_w A_k)² as upper bound
-        amp_sum = amp.sum(dim=-1)  # (B, H, T)
-        energy_potential = (amp_sum.unsqueeze(-1) + amp_sum.unsqueeze(-2)) ** 2  # (B, H, T, T)
-        
-        # Normalize intensity
-        attn_weights = intensity / (energy_potential + self.eps)  # (B, H, T, T)
-        
-        # Temperature scaling (learnable sharpness)
-        attn_weights = attn_weights * self.temperature
-        
         # === Causal masking (Requirement 2.4) ===
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-        attn_weights = attn_weights.masked_fill(causal_mask, 0.0)
         
-        # Row-wise normalization for stability (NOT softmax - preserves interference structure)
-        # This ensures attention weights sum to ~1 per query position
-        row_sum = attn_weights.sum(dim=-1, keepdim=True).clamp(min=self.eps)
-        attn_weights = attn_weights / row_sum
+        # === Normalization Strategy ===
+        # Option A: Pure physics (energy normalization) - can plateau
+        # Option B: Hybrid (interference scores + softmax) - more stable training
+        # 
+        # We use softmax on the interference intensity for stable gradients,
+        # but the SCORES come from physics (not dot products)
         
+        # Scale intensity for softmax (like temperature in standard attention)
+        # The interference values can be large, so we normalize by sqrt(num_waves)
+        scaled_intensity = intensity * self.temperature / (self.num_waves ** 0.5)
+        
+        # Apply causal mask before softmax
+        scaled_intensity = scaled_intensity.masked_fill(causal_mask, float('-inf'))
+        
+        # Softmax for stable probability distribution
+        # KEY: The ranking/relative scores come from interference physics!
+        attn_weights = F.softmax(scaled_intensity, dim=-1)
         # Dropout
         attn_weights = self.dropout(attn_weights)
         
@@ -539,19 +591,11 @@ class InterferenceAttention(nn.Module):
         
         intensity = amp_sq_sum.unsqueeze(-1) + amp_sq_sum.unsqueeze(-2) + cross_term
         
-        # Energy normalization
-        amp_sum = amp.sum(dim=-1)
-        energy_potential = (amp_sum.unsqueeze(-1) + amp_sum.unsqueeze(-2)) ** 2
-        
-        attn_weights = intensity / (energy_potential + self.eps)
-        
-        # Causal mask
+        # Causal mask and softmax (same as forward)
         causal_mask = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
-        attn_weights = attn_weights.masked_fill(causal_mask, 0.0)
-        
-        # Row normalization
-        row_sum = attn_weights.sum(dim=-1, keepdim=True).clamp(min=self.eps)
-        return attn_weights / row_sum
+        scaled_intensity = intensity * self.temperature / (self.num_waves ** 0.5)
+        scaled_intensity = scaled_intensity.masked_fill(causal_mask, float('-inf'))
+        return F.softmax(scaled_intensity, dim=-1)
 
 
 # ==========================================
