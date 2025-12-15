@@ -16,31 +16,54 @@
 Each experiment is **one point** in the grid. Running all experiments together forms a complete ablation study.
 
 ```
-                        ┌─────────────────────────────────────────────────┐
-                        │              EXPERIMENT GRID                     │
-                        │         (Each cell = 1 experiment)               │
-                        └─────────────────────────────────────────────────┘
-
-                                      Attention
-                          Standard        Hybrid          Interference
-                        (GPT-2 Q·K)    (wave+softmax)   (energy norm)
-                       ┌────────────┬──────────────┬──────────────────┐
-          Standard     │ standard_  │     N/A      │       N/A        │
-Embeddings (lookup)    │ transformer│              │                  │
-                       ├────────────┼──────────────┼──────────────────┤
-          Wave         │    N/A     │ wave_        │ interference_    │
-          (physics)    │            │ baseline     │ attention        │
-                       └────────────┴──────────────┴──────────────────┘
-
-                                      Optimizer
-                              AdamW           WaveOpt
-                           ┌──────────────┬──────────────────┐
-              CE Loss      │ wave_        │ rgd_only         │
-Loss                       │ baseline     │                  │
-                           ├──────────────┼──────────────────┤
-              QFE Loss     │ qfe_only     │ full_physics     │
-                           │              │                  │
-                           └──────────────┴──────────────────┘
+```mermaid
+graph TB
+    subgraph "🔬 EXPERIMENT GRID"
+        subgraph "Embeddings × Attention Matrix"
+            A1["🔴 standard_transformer<br/>Standard Embed + Standard Attn<br/>(GPT-2 Q·K + softmax)"]
+            A2["❌ N/A<br/>Standard Embed + Hybrid Attn"]
+            A3["❌ N/A<br/>Standard Embed + Interference Attn"]
+            
+            B1["❌ N/A<br/>Wave Embed + Standard Attn"]
+            B2["🔵 wave_baseline<br/>Wave Embed + Hybrid Attn<br/>(wave + softmax)"]
+            B3["🟢 interference_attention<br/>Wave Embed + Interference Attn<br/>(energy normalization)"]
+        end
+        
+        subgraph "Optimizer × Loss Matrix"
+            C1["🔵 wave_baseline<br/>AdamW + CE Loss"]
+            C2["🔵 rgd_only<br/>WaveOpt + CE Loss"]
+            
+            D1["🔵 qfe_only<br/>AdamW + QFE Loss"]
+            D2["🟢 full_physics<br/>WaveOpt + QFE Loss"]
+        end
+        
+        subgraph "🌊 Pure Wave Architecture"
+            E1["🟣 pure_wave<br/>Pure Wave-to-Wave<br/>(NO embeddings!)"]
+            E2["🟣 pure_wave_full<br/>Pure Wave + WaveOpt + QFE<br/>(100% wave physics)"]
+        end
+    end
+    
+    %% Connect related experiments
+    A1 -.-> B2
+    B2 -.-> B3
+    B3 -.-> E1
+    B2 -.-> C2
+    C2 -.-> D2
+    D2 -.-> E2
+    
+    %% Styling
+    classDef control fill:#ff6b6b,stroke:#d63031,color:#fff
+    classDef wave fill:#74b9ff,stroke:#0984e3,color:#fff
+    classDef physics fill:#00b894,stroke:#00a085,color:#fff
+    classDef pure fill:#fd79a8,stroke:#e84393,color:#fff
+    classDef na fill:#ddd,stroke:#999,color:#666
+    
+    class A1 control
+    class B2,C1,C2,D1 wave
+    class B3,D2 physics
+    class E1,E2 pure
+    class A2,A3,B1 na
+```
 ```
 
 **To run the full grid:** Run each experiment individually. Together they form the complete ablation study.
