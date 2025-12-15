@@ -697,18 +697,19 @@ class VisualizationManager:
             import numpy as np
             
             # Check if model has wave properties
-            has_embedding = hasattr(model, 'embedding')
-            if not has_embedding:
-                # Try to access through module (for DataParallel)
-                if hasattr(model, 'module'):
-                    model = model.module
-                    has_embedding = hasattr(model, 'embedding')
+            # Handle both WaveGPT (has embedding) and PureWaveGPT (has wave_excitation)
+            if hasattr(model, 'module'):
+                model = model.module
             
-            if not has_embedding:
-                print(f"Warning: Model does not have 'embedding' attribute, skipping model plots")
+            if hasattr(model, 'embedding'):
+                # Standard WaveGPT
+                embedding = model.embedding
+            elif hasattr(model, 'wave_excitation'):
+                # PureWaveGPT - use wave_excitation as embedding
+                embedding = model.wave_excitation
+            else:
+                print(f"Warning: Model does not have 'embedding' or 'wave_excitation' attribute, skipping model plots")
                 return
-            
-            embedding = model.embedding
             
             # Check for required wave attributes
             has_freqs = hasattr(embedding, 'base_freqs')
@@ -1050,11 +1051,14 @@ class VisualizationManager:
             if hasattr(model, 'module'):
                 model = model.module
             
-            if not hasattr(model, 'embedding') or not hasattr(model.embedding, 'base_freqs'):
+            # Handle both WaveGPT and PureWaveGPT
+            if hasattr(model, 'embedding') and hasattr(model.embedding, 'base_freqs'):
+                freqs = model.embedding.base_freqs.detach().cpu().numpy()
+            elif hasattr(model, 'wave_excitation') and hasattr(model.wave_excitation, 'base_freqs'):
+                freqs = model.wave_excitation.base_freqs.detach().cpu().numpy()
+            else:
                 print("Warning: Model does not have wave frequencies, skipping frequency-specific attention")
                 return
-            
-            freqs = model.embedding.base_freqs.detach().cpu().numpy()
             
             # Define frequency bands
             freq_flat = freqs.flatten()
@@ -1139,11 +1143,14 @@ class VisualizationManager:
             if hasattr(model, 'module'):
                 model = model.module
             
-            if not hasattr(model, 'embedding') or not hasattr(model.embedding, 'phases'):
+            # Handle both WaveGPT and PureWaveGPT
+            if hasattr(model, 'embedding') and hasattr(model.embedding, 'phases'):
+                phases = model.embedding.phases.detach().cpu().numpy()
+            elif hasattr(model, 'wave_excitation') and hasattr(model.wave_excitation, 'phases'):
+                phases = model.wave_excitation.phases.detach().cpu().numpy()
+            else:
                 print("Warning: Model does not have wave phases, skipping phase coherence")
                 return
-            
-            phases = model.embedding.phases.detach().cpu().numpy()
             
             fig, axes = plt.subplots(2, 2, figsize=(12, 8))
             
@@ -1224,11 +1231,14 @@ class VisualizationManager:
             if hasattr(model, 'module'):
                 model = model.module
             
-            if not hasattr(model, 'embedding'):
-                print("Warning: Model does not have embedding, skipping gradient diagnostics")
+            # Handle both WaveGPT and PureWaveGPT
+            if hasattr(model, 'embedding'):
+                embedding = model.embedding
+            elif hasattr(model, 'wave_excitation'):
+                embedding = model.wave_excitation
+            else:
+                print("Warning: Model does not have embedding or wave_excitation, skipping gradient diagnostics")
                 return
-            
-            embedding = model.embedding
             
             # Collect gradient norms for wave parameters
             grad_info = {}
@@ -1345,11 +1355,14 @@ class VisualizationManager:
             if hasattr(model, 'module'):
                 model = model.module
             
-            if not hasattr(model, 'embedding'):
-                print("Warning: Model does not have embedding, skipping wave space similarity")
+            # Handle both WaveGPT and PureWaveGPT
+            if hasattr(model, 'embedding'):
+                embedding = model.embedding
+            elif hasattr(model, 'wave_excitation'):
+                embedding = model.wave_excitation
+            else:
+                print("Warning: Model does not have embedding or wave_excitation, skipping wave space similarity")
                 return
-            
-            embedding = model.embedding
             
             # Collect wave parameters
             has_freqs = hasattr(embedding, 'base_freqs')

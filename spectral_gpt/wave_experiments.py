@@ -817,7 +817,13 @@ def train_experiment(
             
             # Update wave_ratio if available (handle DataParallel)
             base_model = model.module if hasattr(model, 'module') else model
-            if hasattr(base_model.embedding, 'wave_ratio') and exp_config.wave_ratio_schedule:
+            
+            # Check if this is a PureWaveGPT (no embedding attribute)
+            if hasattr(base_model, 'wave_excitation'):
+                # PureWaveGPT - no wave_ratio annealing needed
+                wave_ratios.append(0.0)  # Pure wave mode
+            elif hasattr(base_model, 'embedding') and hasattr(base_model.embedding, 'wave_ratio') and exp_config.wave_ratio_schedule:
+                # Standard WaveGPT with annealing
                 target_ratio = get_wave_ratio_target(step)
                 # Softly push toward target
                 with torch.no_grad():
@@ -831,6 +837,9 @@ def train_experiment(
                         math.log(new_ratio / (1 - new_ratio))
                     ).to(device)
                 wave_ratios.append(torch.sigmoid(base_model.embedding.wave_ratio).item())
+            else:
+                # No wave_ratio available
+                wave_ratios.append(0.0)
             
             
             # --- Gradient Accumulation Loop ---
