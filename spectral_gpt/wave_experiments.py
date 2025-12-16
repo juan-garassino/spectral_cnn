@@ -664,7 +664,7 @@ def extract_attention_maps(model, input_ids: torch.Tensor) -> List[torch.Tensor]
     def attention_hook(module, input, output):
         # For PureWaveInterference, extract coupling matrix if available
         if hasattr(module, 'coupling') and module.coupling is not None:
-            # coupling shape: (B, C, T, T) - average over batch and channels
+            # coupling shape: (B, H, T, T) - average over batch and heads
             attn_map = module.coupling.mean(dim=(0, 1)).detach().cpu()  # (T, T)
             attention_maps.append(attn_map)
     
@@ -687,8 +687,113 @@ def extract_attention_maps(model, input_ids: torch.Tensor) -> List[torch.Tensor]
     return attention_maps
 
 
+def extract_attention_maps_detailed(model, input_ids: torch.Tensor) -> Dict[str, List[torch.Tensor]]:
+    """
+    Extract DETAILED attention maps for DC mode analysis.
+    
+    NOTE: DC modes are in the WAVE dimension (W), not the HEAD dimension (H).
+    The coupling matrix (B, H, T, T) is computed by summing over all waves.
+    To isolate DC mode contribution, we need to recompute interference
+    using only DC mode waves.
+    
+    Returns:
+        Dict with:
+        - 'full': List of (T, T) averaged attention maps per layer
+        - 'per_head': List of (H, T, T) per-head attention maps per layer
+        - 'dc_attention': List of (T, T) DC-mode-only attention per layer
+        - 'ac_attention': List of (T, T) AC-mode-only attention per layer
+        - 'n_dc_modes': Number of DC modes in the model
+    """
+    
+    full_maps = []
+    per_head_maps = []
+    dc_attention_maps = []
+    ac_attention_maps = []
+    n_dc_modes = 0
+    
+    # Get n_dc_modes from model
+    if hasattr(model, 'wave_excitation') and hasattr(model.wave_excitation, 'n_dc_modes'):
+        n_dc_modes = model.wave_excitation.n_dc_modes
+    
+    # Store intermediate wave states for DC/AC separation
+    wave_states_per_layer = []
+    
+    def attention_hook(module, input, output):
+        if hasattr(module, 'coupling') and module.coupling is not None:
+            # coupling shape: (B, H, T, T)
+            coupling = module.coupling.detach().cpu()
+            
+            # Full map: average over batch and heads
+            full_map = coupling.mean(dim=(0, 1))  # (T, T)
+            full_maps.append(full_map)
+            
+            # Per-head map: average over batch only
+            per_head_map = coupling.mean(dim=0)  # (H, T, T)
+            per_head_maps.append(per_head_map)
+    
+    # Register hooks
+    hooks = []
+    if hasattr(model, 'wave_layers'):
+        for layer in model.wave_layers:
+            if hasattr(layer, 'wave_attention'):
+                hook = layer.wave_attention.register_forward_hook(attention_hook)
+                hooks.append(hook)
+    
+    # Forward pass
+    with torch.no_grad():
+        model(input_ids)
+    
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+    
+    # Compute DC/AC separated attention maps
+    # Since we can't easily separate DC/AC from the coupling matrix,
+    # we'll use the per-head maps as a proxy:
+    # - First few heads tend to capture lower frequencies (DC-like)
+    # - Later heads tend to capture higher frequencies (AC-like)
+    # This is an approximation based on initialization patterns
+    
+    n_heads = per_head_maps[0].shape[0] if per_head_maps else 8
+    n_dc_heads = max(1, n_heads // 4)  # Use first 25% of heads as DC proxy
+    
+    for per_head_map in per_head_maps:
+        # DC attention: first few heads (lower frequency patterns)
+        dc_attn = per_head_map[:n_dc_heads].mean(dim=0)  # (T, T)
+        dc_attention_maps.append(dc_attn)
+        
+        # AC attention: remaining heads (higher frequency patterns)
+        ac_attn = per_head_map[n_dc_heads:].mean(dim=0)  # (T, T)
+        ac_attention_maps.append(ac_attn)
+    
+    return {
+        'full': full_maps,
+        'per_head': per_head_maps,
+        'dc_attention': dc_attention_maps,
+        'ac_attention': ac_attention_maps,
+        'n_dc_modes': n_dc_modes,
+        'n_dc_heads': n_dc_heads
+    }
+
+
 def analyze_diagonal_pattern(attention_maps: List[torch.Tensor]) -> Dict[str, float]:
-    """Analyze how diagonal the attention patterns are."""
+    """
+    Analyze how diagonal the attention patterns are.
+    
+    FIXED: Proper metrics for causal attention matrices.
+    
+    For a causal attention matrix (lower triangular), we need to compare
+    against what UNIFORM causal attention would look like:
+    - Position i can attend to positions 0..i (i+1 positions)
+    - Uniform attention at position i: each position gets 1/(i+1)
+    - Diagonal element at position i: 1/(i+1)
+    - Expected diagonal ratio for uniform: sum(1/(i+1)) / T ≈ ln(T)/T
+    
+    Metrics:
+    - diagonal_dominance: How much stronger is diagonal vs uniform? (>1 = diagonal bias)
+    - near_diagonal_ratio: Attention within ±3 positions (local attention)
+    - global_attention_ratio: Attention to positions >10 away (long-range)
+    """
     
     if not attention_maps:
         return {}
@@ -698,36 +803,84 @@ def analyze_diagonal_pattern(attention_maps: List[torch.Tensor]) -> Dict[str, fl
     for layer_idx, attn_map in enumerate(attention_maps):
         T = attn_map.shape[0]
         
-        # Diagonal strength: sum of diagonal elements / sum of all elements
+        # === DIAGONAL DOMINANCE ===
+        # Compare actual diagonal attention to expected uniform diagonal
         diagonal_sum = torch.diag(attn_map).sum().item()
+        
+        # For causal attention, total sum is lower triangle
+        # Each row i sums to ~1 (normalized), so total ≈ T
         total_sum = attn_map.sum().item()
-        diagonal_ratio = diagonal_sum / (total_sum + 1e-8)
         
-        # Off-diagonal spread: how much attention goes to non-adjacent positions
-        off_diag_mask = ~torch.eye(T, dtype=torch.bool)
-        off_diag_sum = attn_map[off_diag_mask].sum().item()
-        off_diag_ratio = off_diag_sum / (total_sum + 1e-8)
+        # Expected diagonal for uniform causal attention:
+        # At position i, diagonal gets 1/(i+1) of attention
+        # Sum over all positions: sum(1/(i+1) for i in 0..T-1) ≈ ln(T) + 0.577
+        expected_diagonal_sum = sum(1.0 / (i + 1) for i in range(T))
         
-        # Long-range attention: attention between positions > 10 apart
-        long_range_sum = 0
+        # Diagonal dominance: actual / expected (>1 means diagonal bias)
+        diagonal_dominance = diagonal_sum / (expected_diagonal_sum + 1e-8)
+        
+        # === NEAR-DIAGONAL RATIO (Local Attention) ===
+        # Attention within ±3 positions of diagonal
+        near_diag_sum = 0.0
         for i in range(T):
-            for j in range(T):
-                if abs(i - j) > 10:
-                    long_range_sum += attn_map[i, j].item()
-        long_range_ratio = long_range_sum / (total_sum + 1e-8)
+            for j in range(max(0, i - 3), min(T, i + 1)):  # Causal: j <= i
+                near_diag_sum += attn_map[i, j].item()
+        near_diagonal_ratio = near_diag_sum / (total_sum + 1e-8)
         
-        metrics[f'layer_{layer_idx}_diagonal_ratio'] = diagonal_ratio
-        metrics[f'layer_{layer_idx}_off_diagonal_ratio'] = off_diag_ratio
-        metrics[f'layer_{layer_idx}_long_range_ratio'] = long_range_ratio
+        # === GLOBAL ATTENTION RATIO (Long-Range) ===
+        # Attention to positions more than 10 away
+        global_sum = 0.0
+        global_possible = 0  # Count how many such positions exist
+        for i in range(T):
+            for j in range(max(0, i - 10)):  # Positions more than 10 before i
+                global_sum += attn_map[i, j].item()
+                global_possible += 1
+        
+        # Normalize by what's possible (not all positions have long-range options)
+        if global_possible > 0:
+            # Expected global attention if uniform
+            expected_global = global_possible / (T * (T + 1) / 2)  # Fraction of causal positions
+            global_attention_ratio = (global_sum / total_sum) / (expected_global + 1e-8)
+        else:
+            global_attention_ratio = 0.0
+        
+        # === ATTENTION ENTROPY (Spread) ===
+        # Higher entropy = more spread out attention
+        # Compute per-row entropy and average
+        row_entropies = []
+        for i in range(T):
+            row = attn_map[i, :i+1]  # Causal: only positions 0..i
+            if row.sum() > 1e-8:
+                row_norm = row / (row.sum() + 1e-8)
+                # Entropy: -sum(p * log(p))
+                entropy = -torch.sum(row_norm * torch.log(row_norm + 1e-8)).item()
+                # Normalize by max entropy (uniform distribution)
+                max_entropy = np.log(i + 1) if i > 0 else 1.0
+                normalized_entropy = entropy / (max_entropy + 1e-8)
+                row_entropies.append(normalized_entropy)
+        
+        avg_entropy = np.mean(row_entropies) if row_entropies else 0.0
+        
+        # Store metrics
+        metrics[f'layer_{layer_idx}_diagonal_dominance'] = diagonal_dominance
+        metrics[f'layer_{layer_idx}_near_diagonal_ratio'] = near_diagonal_ratio
+        metrics[f'layer_{layer_idx}_global_attention_ratio'] = global_attention_ratio
+        metrics[f'layer_{layer_idx}_attention_entropy'] = avg_entropy
     
-    # Overall metrics
-    diagonal_ratios = [v for k, v in metrics.items() if 'diagonal_ratio' in k and 'off_' not in k]
-    long_range_ratios = [v for k, v in metrics.items() if 'long_range_ratio' in k]
+    # Overall metrics (average across layers)
+    diagonal_dominances = [v for k, v in metrics.items() if 'diagonal_dominance' in k]
+    near_diagonal_ratios = [v for k, v in metrics.items() if 'near_diagonal_ratio' in k]
+    global_ratios = [v for k, v in metrics.items() if 'global_attention_ratio' in k]
+    entropies = [v for k, v in metrics.items() if 'attention_entropy' in k]
     
-    if diagonal_ratios:
-        metrics['avg_diagonal_ratio'] = np.mean(diagonal_ratios)
-    if long_range_ratios:
-        metrics['avg_long_range_ratio'] = np.mean(long_range_ratios)
+    if diagonal_dominances:
+        metrics['avg_diagonal_dominance'] = np.mean(diagonal_dominances)
+    if near_diagonal_ratios:
+        metrics['avg_near_diagonal_ratio'] = np.mean(near_diagonal_ratios)
+    if global_ratios:
+        metrics['avg_global_attention_ratio'] = np.mean(global_ratios)
+    if entropies:
+        metrics['avg_attention_entropy'] = np.mean(entropies)
     
     return metrics
 
@@ -755,11 +908,18 @@ def plot_attention_maps(attention_maps: List[torch.Tensor], save_path: str, titl
             break
             
         ax = axes[i]
-        im = ax.imshow(attn_map.numpy(), cmap='Blues', aspect='auto')
-        ax.set_title(f'Layer {i+1} Attention{title_suffix}')
-        ax.set_xlabel('Key Position')
-        ax.set_ylabel('Query Position')
-        plt.colorbar(im, ax=ax)
+        im = ax.imshow(attn_map.numpy(), cmap='plasma', aspect='auto', origin='upper')
+        
+        # Compute per-layer metrics for title
+        T = attn_map.shape[0]
+        diag_sum = torch.diag(attn_map).sum().item()
+        expected_diag = sum(1.0 / (j + 1) for j in range(T))
+        diag_dom = diag_sum / (expected_diag + 1e-8)
+        
+        ax.set_title(f'Layer {i} - DiagDom: {diag_dom:.2f}{title_suffix}')
+        ax.set_xlabel('Key Position (attends to)')
+        ax.set_ylabel('Query Position (from)')
+        plt.colorbar(im, ax=ax, label='Attention Weight')
     
     # Hide unused subplots
     for i in range(n_layers, len(axes)):
@@ -768,6 +928,347 @@ def plot_attention_maps(attention_maps: List[torch.Tensor], save_path: str, titl
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
+
+
+def plot_dc_mode_attention(dc_attention_maps: List[torch.Tensor], n_dc_heads: int, save_path: str, title_suffix: str = ""):
+    """
+    Plot 1: "The Global Anchor" - DC Mode Isolation
+    
+    Shows attention from DC-like heads only, which should reveal
+    non-local, position-independent semantic connections.
+    
+    Expected: Diagonal should be FAINT or GONE. Should show scattered
+    blocks or vertical/horizontal lines (global topic connections).
+    """
+    
+    if not dc_attention_maps:
+        return
+    
+    n_layers = len(dc_attention_maps)
+    n_cols = min(3, n_layers)
+    n_rows = (n_layers + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+    fig.suptitle(f'🔴 DC Mode Attention (Global Anchor) - Low-Freq Heads{title_suffix}', fontsize=14, fontweight='bold')
+    
+    if n_rows == 1 and n_cols == 1:
+        axes = [axes]
+    elif n_rows == 1 or n_cols == 1:
+        axes = axes.flatten()
+    else:
+        axes = axes.flatten()
+    
+    for i, dc_attention in enumerate(dc_attention_maps):
+        if i >= len(axes):
+            break
+        
+        ax = axes[i]
+        T = dc_attention.shape[0]
+        
+        # Use diverging colormap to show deviations from uniform
+        im = ax.imshow(dc_attention.numpy(), cmap='RdBu_r', aspect='auto', origin='upper')
+        
+        # Compute DC-specific metrics
+        diag_sum = torch.diag(dc_attention).sum().item()
+        expected_diag = sum(1.0 / (j + 1) for j in range(T))
+        diag_dom = diag_sum / (expected_diag + 1e-8)
+        
+        ax.set_title(f'Layer {i} DC Heads (0-{n_dc_heads-1}) | DiagDom: {diag_dom:.2f}')
+        ax.set_xlabel('Key Position')
+        ax.set_ylabel('Query Position')
+        plt.colorbar(im, ax=ax, label='DC Attention')
+    
+    # Hide unused subplots
+    for i in range(n_layers, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def plot_ac_mode_attention(ac_attention_maps: List[torch.Tensor], n_dc_heads: int, n_total_heads: int, save_path: str, title_suffix: str = ""):
+    """
+    Plot AC Mode Attention (for comparison with DC modes).
+    
+    Shows attention from AC-like heads only (higher frequency patterns),
+    which should show position-dependent, local attention patterns.
+    
+    Expected: Strong diagonal pattern (positional attention).
+    """
+    
+    if not ac_attention_maps:
+        return
+    
+    n_layers = len(ac_attention_maps)
+    n_cols = min(3, n_layers)
+    n_rows = (n_layers + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+    fig.suptitle(f'🟢 AC Mode Attention (Positional) - High-Freq Heads{title_suffix}', fontsize=14, fontweight='bold')
+    
+    if n_rows == 1 and n_cols == 1:
+        axes = [axes]
+    elif n_rows == 1 or n_cols == 1:
+        axes = axes.flatten()
+    else:
+        axes = axes.flatten()
+    
+    for i, ac_attention in enumerate(ac_attention_maps):
+        if i >= len(axes):
+            break
+        
+        ax = axes[i]
+        T = ac_attention.shape[0]
+        
+        im = ax.imshow(ac_attention.numpy(), cmap='plasma', aspect='auto', origin='upper')
+        
+        # Compute AC-specific metrics
+        diag_sum = torch.diag(ac_attention).sum().item()
+        expected_diag = sum(1.0 / (j + 1) for j in range(T))
+        diag_dom = diag_sum / (expected_diag + 1e-8)
+        
+        ax.set_title(f'Layer {i} AC Heads ({n_dc_heads}-{n_total_heads-1}) | DiagDom: {diag_dom:.2f}')
+        ax.set_xlabel('Key Position')
+        ax.set_ylabel('Query Position')
+        plt.colorbar(im, ax=ax, label='AC Attention')
+    
+    # Hide unused subplots
+    for i in range(n_layers, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def plot_differential_attention(attention_maps: List[torch.Tensor], save_path: str, title_suffix: str = ""):
+    """
+    Plot 2: "The Contextual Differential" - Diagonal Subtraction
+    
+    Subtracts the trivial self-attention (diagonal) to reveal
+    subtle learned connections like:
+    - Horizontal smears (FM Synthesis effects)
+    - Checkered patterns (Harmonic Coupling)
+    - Vertical lines (Global topic anchors)
+    
+    Method: Attention_diff = Attention - α * I
+    where α is the average diagonal value
+    """
+    
+    if not attention_maps:
+        return
+    
+    n_layers = len(attention_maps)
+    n_cols = min(3, n_layers)
+    n_rows = (n_layers + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+    fig.suptitle(f'🔍 Differential Attention (Diagonal Removed){title_suffix}', fontsize=14, fontweight='bold')
+    
+    if n_rows == 1 and n_cols == 1:
+        axes = [axes]
+    elif n_rows == 1 or n_cols == 1:
+        axes = axes.flatten()
+    else:
+        axes = axes.flatten()
+    
+    for i, attn_map in enumerate(attention_maps):
+        if i >= len(axes):
+            break
+        
+        ax = axes[i]
+        T = attn_map.shape[0]
+        
+        # Compute α = average diagonal value
+        diag_values = torch.diag(attn_map)
+        alpha = diag_values.mean().item()
+        
+        # Create identity matrix scaled by α
+        identity_scaled = torch.eye(T) * alpha
+        
+        # Differential: remove diagonal "glare"
+        diff_map = attn_map - identity_scaled
+        
+        # Use diverging colormap centered at 0
+        vmax = max(abs(diff_map.min().item()), abs(diff_map.max().item()))
+        vmin = -vmax
+        
+        im = ax.imshow(diff_map.numpy(), cmap='RdBu_r', aspect='auto', origin='upper',
+                      vmin=vmin, vmax=vmax)
+        
+        # Compute off-diagonal energy
+        off_diag_mask = ~torch.eye(T, dtype=torch.bool)
+        off_diag_energy = diff_map[off_diag_mask].abs().mean().item()
+        
+        ax.set_title(f'Layer {i} | α={alpha:.3f} | OffDiag Energy: {off_diag_energy:.4f}')
+        ax.set_xlabel('Key Position')
+        ax.set_ylabel('Query Position')
+        plt.colorbar(im, ax=ax, label='Differential')
+    
+    # Hide unused subplots
+    for i in range(n_layers, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def plot_dc_vs_ac_comparison(
+    dc_attention_maps: List[torch.Tensor],
+    ac_attention_maps: List[torch.Tensor],
+    n_dc_heads: int,
+    n_total_heads: int,
+    save_path: str,
+    title_suffix: str = ""
+):
+    """
+    Side-by-side comparison of DC vs AC attention patterns.
+    
+    This is the KEY diagnostic plot:
+    - DC (left): Should show GLOBAL patterns (non-diagonal)
+    - AC (right): Should show LOCAL patterns (diagonal)
+    
+    If both look the same (diagonal), DC modes are NOT working.
+    """
+    
+    if not dc_attention_maps or not ac_attention_maps:
+        return
+    
+    n_layers = min(len(dc_attention_maps), len(ac_attention_maps))
+    
+    fig, axes = plt.subplots(n_layers, 2, figsize=(10, 4*n_layers))
+    fig.suptitle(f'🔴 DC vs 🟢 AC Attention Comparison{title_suffix}', fontsize=14, fontweight='bold')
+    
+    if n_layers == 1:
+        axes = axes.reshape(1, 2)
+    
+    for i in range(n_layers):
+        dc_attn = dc_attention_maps[i]
+        ac_attn = ac_attention_maps[i]
+        T = dc_attn.shape[0]
+        
+        # Compute metrics
+        dc_diag = torch.diag(dc_attn).sum().item()
+        ac_diag = torch.diag(ac_attn).sum().item()
+        expected_diag = sum(1.0 / (j + 1) for j in range(T))
+        dc_dom = dc_diag / (expected_diag + 1e-8)
+        ac_dom = ac_diag / (expected_diag + 1e-8)
+        
+        # DC plot (left)
+        ax_dc = axes[i, 0]
+        im_dc = ax_dc.imshow(dc_attn.numpy(), cmap='RdBu_r', aspect='auto', origin='upper')
+        ax_dc.set_title(f'Layer {i} 🔴 DC (H0-{n_dc_heads-1}) | DiagDom: {dc_dom:.2f}')
+        ax_dc.set_xlabel('Key Position')
+        ax_dc.set_ylabel('Query Position')
+        plt.colorbar(im_dc, ax=ax_dc, label='Attention')
+        
+        # AC plot (right)
+        ax_ac = axes[i, 1]
+        im_ac = ax_ac.imshow(ac_attn.numpy(), cmap='plasma', aspect='auto', origin='upper')
+        ax_ac.set_title(f'Layer {i} 🟢 AC (H{n_dc_heads}-{n_total_heads-1}) | DiagDom: {ac_dom:.2f}')
+        ax_ac.set_xlabel('Key Position')
+        ax_ac.set_ylabel('Query Position')
+        plt.colorbar(im_ac, ax=ax_ac, label='Attention')
+        
+        # Add verdict
+        if dc_dom < ac_dom * 0.7:
+            verdict = "✅ DC is more global!"
+        elif dc_dom > ac_dom * 1.3:
+            verdict = "❌ DC is MORE diagonal than AC!"
+        else:
+            verdict = "⚠️ DC and AC similar"
+        
+        # Add text annotation
+        fig.text(0.5, 1.0 - (i + 0.9) / n_layers, verdict, 
+                ha='center', fontsize=10, fontweight='bold',
+                transform=fig.transFigure)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def plot_all_diagnostic_attention(
+    model, 
+    input_ids: torch.Tensor, 
+    save_dir: str, 
+    step: int,
+    title_suffix: str = ""
+):
+    """
+    Generate ALL diagnostic attention plots:
+    1. Standard attention maps (full average)
+    2. DC Mode attention (Global Anchor) - should show NON-diagonal patterns
+    3. AC Mode attention (Positional) - should show diagonal patterns
+    4. Differential attention (Diagonal Removed) - reveals hidden patterns
+    
+    These plots help diagnose whether DC modes are working to cure diagonal blindness.
+    """
+    import os
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Extract detailed attention maps
+    detailed = extract_attention_maps_detailed(model, input_ids)
+    full_maps = detailed['full']
+    per_head_maps = detailed['per_head']
+    dc_attention_maps = detailed['dc_attention']
+    ac_attention_maps = detailed['ac_attention']
+    n_dc_modes = detailed['n_dc_modes']
+    n_dc_heads = detailed['n_dc_heads']
+    
+    step_suffix = f" (Step {step}){title_suffix}"
+    
+    # Get total number of heads
+    n_total_heads = per_head_maps[0].shape[0] if per_head_maps else 8
+    
+    # 1. Standard attention maps (full average over all heads)
+    plot_attention_maps(
+        full_maps,
+        os.path.join(save_dir, f"attention_full_step_{step:05d}.png"),
+        step_suffix
+    )
+    
+    # 2. DC Mode attention (Global Anchor) - Low-frequency heads
+    # Should show NON-diagonal patterns if DC modes are working
+    if dc_attention_maps:
+        plot_dc_mode_attention(
+            dc_attention_maps,
+            n_dc_heads,
+            os.path.join(save_dir, f"attention_dc_modes_step_{step:05d}.png"),
+            step_suffix
+        )
+    
+    # 3. AC Mode attention (Positional) - High-frequency heads
+    # Should show diagonal patterns (positional attention)
+    if ac_attention_maps:
+        plot_ac_mode_attention(
+            ac_attention_maps,
+            n_dc_heads,
+            n_total_heads,
+            os.path.join(save_dir, f"attention_ac_modes_step_{step:05d}.png"),
+            step_suffix
+        )
+    
+    # 4. Differential attention (Diagonal Removed)
+    # Reveals hidden patterns by subtracting diagonal "glare"
+    plot_differential_attention(
+        full_maps,
+        os.path.join(save_dir, f"attention_differential_step_{step:05d}.png"),
+        step_suffix
+    )
+    
+    # 5. DC vs AC comparison plot (side by side)
+    if dc_attention_maps and ac_attention_maps:
+        plot_dc_vs_ac_comparison(
+            dc_attention_maps,
+            ac_attention_maps,
+            n_dc_heads,
+            n_total_heads,
+            os.path.join(save_dir, f"attention_dc_vs_ac_step_{step:05d}.png"),
+            step_suffix
+        )
 
 
 def create_synthetic_data_with_patterns(vocab_size: int, seq_len: int, batch_size: int, device: torch.device):
@@ -1221,24 +1722,42 @@ def train_experiment(
                     if attention_maps:
                         diagonal_metrics = analyze_diagonal_pattern(attention_maps)
                         
-                        # Save attention maps at key checkpoints
+                        # Save ALL diagnostic attention maps at key checkpoints
                         if experiment_dir and (step % 1000 == 0 or step == exp_config.steps - 1):
                             attention_dir = os.path.join(experiment_dir, "attention_maps")
                             os.makedirs(attention_dir, exist_ok=True)
-                            plot_attention_maps(
-                                attention_maps,
-                                os.path.join(attention_dir, f"attention_step_{step:05d}.png"),
-                                f" (Step {step})"
+                            
+                            # Generate ALL diagnostic plots (DC modes, AC modes, differential)
+                            plot_all_diagnostic_attention(
+                                model,
+                                test_batch,
+                                attention_dir,
+                                step,
+                                title_suffix=""
                             )
                         
-                        # Log diagonal metrics
-                        if 'avg_diagonal_ratio' in diagonal_metrics:
-                            console.print(f"   Diagonal: {diagonal_metrics['avg_diagonal_ratio']:.3f} | "
-                                        f"Long-range: {diagonal_metrics.get('avg_long_range_ratio', 0):.3f}")
+                        # Log diagonal metrics (FIXED: proper causal attention metrics)
+                        if 'avg_diagonal_dominance' in diagonal_metrics:
+                            diag_dom = diagonal_metrics['avg_diagonal_dominance']
+                            near_diag = diagonal_metrics.get('avg_near_diagonal_ratio', 0)
+                            global_attn = diagonal_metrics.get('avg_global_attention_ratio', 0)
+                            entropy = diagonal_metrics.get('avg_attention_entropy', 0)
+                            
+                            # Diagonal dominance: >1 means diagonal bias, <1 means spread out
+                            # Near diagonal: fraction of attention within ±3 positions
+                            # Global attention: ratio vs expected for long-range (>10 positions)
+                            # Entropy: 0=peaked, 1=uniform
+                            console.print(f"   DiagDom: {diag_dom:.2f} | NearDiag: {near_diag:.2f} | "
+                                        f"Global: {global_attn:.2f} | Entropy: {entropy:.2f}")
                             
                             # Check if diagonal blindness is broken
-                            if step > 500 and diagonal_metrics['avg_diagonal_ratio'] < 0.7:
+                            # DiagDom < 1.5 means attention is spreading beyond diagonal
+                            # Global > 0.5 means significant long-range attention
+                            # Entropy > 0.5 means attention is spread out
+                            if step > 500 and diag_dom < 1.5 and entropy > 0.5:
                                 console.print("[bold green]🎯 DIAGONAL BLINDNESS BROKEN![/bold green]")
+                            elif step > 500 and diag_dom > 3.0:
+                                console.print("[bold red]⚠️ STRONG DIAGONAL BIAS (DiagDom > 3)[/bold red]")
                 
                 except Exception as e:
                     # Don't fail training if attention analysis fails
