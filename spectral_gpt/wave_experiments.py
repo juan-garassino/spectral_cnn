@@ -528,6 +528,71 @@ ABLATION_EXPERIMENTS = {
         use_interferometer=True,
         mlp_expansion=4
     ),
+    
+    # ============================================================
+    # SCALED FINAL TRAINING: 120M Parameters Long Run
+    # ============================================================
+    # This is the FINAL experiment to test DC modes at scale
+    # Uses: DC modes + Trinity + Multi-head + 4x MLP + longer training
+    
+    "scaled_final": ExperimentConfig(
+        name="🚀 Scaled PureWave (120M) - Final Training",
+        model_type="pure_wave",
+        use_rgd=False,      # Use AdamW for stability at scale
+        use_qfe=False,      # Disable QFE initially
+        lr=3e-4,            # Lower LR for larger model
+        weight_decay=0.1,   # Stronger regularization at scale
+        dropout=0.1,
+        warmup_steps=2000,  # Longer warmup for larger model
+        patience=10,        # More patience for longer training
+        steps=20000,        # Long training run
+        grad_accum_steps=8, # Effective batch = 8 * 8 = 64
+        # === FULL TRINITY ENABLED ===
+        use_overdrive=True,
+        use_fm_synthesis=True,
+        use_interferometer=True,
+        mlp_expansion=4,    # 4x MLP expansion for reasoning
+    ),
+    
+    # Scaled with QFE loss (experimental)
+    "scaled_final_qfe": ExperimentConfig(
+        name="🚀 Scaled PureWave (120M) + QFE Loss",
+        model_type="pure_wave",
+        use_rgd=False,
+        use_qfe=True,       # Enable QFE for coherence
+        qfe_lambda=0.01,    # Low QFE weight
+        lr=3e-4,
+        weight_decay=0.1,
+        dropout=0.1,
+        warmup_steps=2000,
+        patience=10,
+        steps=20000,
+        grad_accum_steps=8,
+        use_overdrive=True,
+        use_fm_synthesis=True,
+        use_interferometer=True,
+        mlp_expansion=4,
+    ),
+    
+    # Scaled baseline (no Trinity) for comparison
+    "scaled_baseline": ExperimentConfig(
+        name="📊 Scaled PureWave (120M) - Baseline (No Trinity)",
+        model_type="pure_wave",
+        use_rgd=False,
+        use_qfe=False,
+        lr=3e-4,
+        weight_decay=0.1,
+        dropout=0.1,
+        warmup_steps=2000,
+        patience=10,
+        steps=20000,
+        grad_accum_steps=8,
+        # === TRINITY DISABLED for comparison ===
+        use_overdrive=False,
+        use_fm_synthesis=False,
+        use_interferometer=False,
+        mlp_expansion=1,    # No MLP expansion
+    ),
 }
 
 
@@ -563,6 +628,20 @@ MODEL_CONFIGS = {
         d_model=768, num_layers=12, num_heads=12,
         num_waves=96, num_harmonics=4,
         vocab_size=50257, block_size=512, batch_size=16
+    ),
+    # === SCALED MODEL: ~120M Parameters ===
+    # Designed for final long training run to test DC modes at scale
+    # Target: 120M params with full Trinity + DC modes
+    "scaled": ModelConfig(
+        name="Scaled (120M PureWave)",
+        d_model=768,        # Same as GPT-2 small
+        num_layers=12,      # 12 layers for depth
+        num_heads=12,       # 12 heads for multi-head diversity
+        num_waves=96,       # More waves for richer spectrum
+        num_harmonics=4,    # Keep harmonics at 4
+        vocab_size=50257,   # GPT-2 vocabulary
+        block_size=512,     # Longer context
+        batch_size=8        # Smaller batch for memory (use grad_accum)
     ),
 }
 
